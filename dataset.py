@@ -310,16 +310,16 @@ def collate_fn(batch):
     tgt_lang = torch.tensor([b["tgt_lang"] for b in batch])
 
     # ── audio (present when src_mod=AUDIO or tgt_mod=AUDIO) ──────────────────
-    has_mel = any(b["mel"] is not None for b in batch)
+    has_mel = any(b.get("mel") is not None for b in batch)
     if has_mel:
-        mels   = [b["mel"] for b in batch if b["mel"] is not None]
+        mels   = [b["mel"] for b in batch if b.get("mel") is not None]
         max_T  = max(m.shape[1] for m in mels)
         n_mels = mels[0].shape[0]
         audio_pad  = torch.zeros(len(batch), n_mels, max_T)
         audio_mask = torch.ones(len(batch), max_T, dtype=torch.bool)
         mel_idx = 0
         for i, b in enumerate(batch):
-            if b["mel"] is not None:
+            if b.get("mel") is not None:
                 t = b["mel"].shape[1]
                 audio_pad[i, :, :t] = b["mel"]
                 audio_mask[i, :t]   = False
