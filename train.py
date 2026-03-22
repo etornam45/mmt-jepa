@@ -7,10 +7,10 @@ from tqdm import tqdm
 from dataset import ObjA, ObjB, ObjC
 from model import MMT_JEPA, ModelConfig
 
-EPOCHS     = 50
+EPOCHS     = 5
 LR         = 3e-4
 BATCH_SIZE = 32
-LOG_EVERY  = 50
+LOG_EVERY  = 500
 GRAD_CLIP  = 1.0
 
 if __name__ == "__main__":
