@@ -2,7 +2,7 @@
 MMT-JEPA datasets — one class per JEPA objective.
  
     ObjA  Audio -> Text   (both languages)
-          English: openslr/librispeech_asr  train.clean.100
+          English: openslr/librispeech_asr  train.100
           Twi:     ghananlpcommunity/twi-speech-text-multispeaker-16k
                    + BibleTTS local (openslr.org/129)
  
@@ -67,7 +67,7 @@ def make_mel(audio, src_sr: int,
  
 class _LibriSpeech(Dataset):
     """English audio + transcript from openslr/librispeech_asr."""
-    def __init__(self, tokenizer, max_text: int = 256, split: str = "train.clean.100") -> None:
+    def __init__(self, tokenizer, max_text: int = 256, split: str = "train.100") -> None:
         from datasets import load_dataset
         self.ds      = load_dataset("openslr/librispeech_asr", "clean", split=split)
         self.tok     = tokenizer

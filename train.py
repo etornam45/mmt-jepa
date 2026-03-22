@@ -2,7 +2,7 @@ import math
 import time
 import torch
 import torch.nn.functional as F
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, DataLoader
 from model   import MMT_JEPA, ModelConfig
 from dataset import ObjA, ObjB, ObjC
 from tqdm import tqdm
@@ -30,7 +30,8 @@ if __name__ == "__main__":
     )
     print("Total Dataset =", len(ds))
 
-    loader = ds.loader(batch_size=BATCH_SIZE, shuffle=True, num_workers=10)
+    # loader = ds.loader(batch_size=BATCH_SIZE, shuffle=True, num_workers=10)
+    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=10)
     total  = len(loader) * EPOCHS
 
     model = MMT_JEPA(ModelConfig()).to(device)
