@@ -39,7 +39,7 @@ class ModelConfig:
     n_mods:       int   = 2      # text, audio
     dropout:      float = 0.15
     ema_decay:    float = 0.996
-    max_seq_len:  int   = 900   # upper bound for PE cache
+    max_seq_len:  int   = 1500   # upper bound for PE cache
     sample_rate:  int   = 16_000 # audio sample rate
 
 
