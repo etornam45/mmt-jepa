@@ -9,7 +9,7 @@ from model import MMT_JEPA, ModelConfig
 
 EPOCHS     = 5
 LR         = 3e-4
-BATCH_SIZE = 32
+BATCH_SIZE = 32 * 2
 LOG_EVERY  = 500
 GRAD_CLIP  = 1.0
 
