@@ -11,48 +11,53 @@ Run:
 from datasets import load_dataset
 import sentencepiece as spm
 
-VOCAB_SIZE = 16_000  # good for 2-language system
+VOCAB_SIZE   = 16_000 
 MODEL_PREFIX = "model/tokenizer"
-CORPUS_FILE = "corpus.txt"
+CORPUS_FILE  = "corpus.txt"
 
-print("Loading dataset...")
-ds = load_dataset(
-    "ghananlpcommunity/twi-english-paragraph-dataset_news",
-    split="train",
-)
+SOURCES = [
+    ("ghananlpcommunity/twi-english-paragraph-dataset_news", "ENGLISH", "TWI"),
+    ("ghananlpcommunity/english-twi-sentences-non-nouns",    "english", "twi"),
+    ("ghananlpcommunity/english-twi-nouns-v2",               "english", "twi"),
+]
 
-print(f"Writing corpus ({len(ds):,} rows × 2 languages)...")
+print(f"Writing corpus to {CORPUS_FILE} ...")
 with open(CORPUS_FILE, "w", encoding="utf-8") as f:
-    for row in ds:
-        eng = str(row.get("ENGLISH") or "").strip()
-        twi = str(row.get("TWI") or "").strip()
-        if eng:
-            f.write(eng + "\n")
-        if twi:
-            f.write(twi + "\n")
+    for repo, eng_col, twi_col in SOURCES:
+        try:
+            ds = load_dataset(repo, split="train")
+            for row in ds:
+                eng = str(row.get(eng_col) or "").strip()
+                twi = str(row.get(twi_col) or "").strip()
+                if eng: 
+                    f.write(eng + "\n")
+                if twi: 
+                    f.write(twi + "\n")
+            print(f"  {repo.split('/')[1]}: {len(ds):,} rows")
+        except Exception as e:
+            print(f"  {repo.split('/')[1]} skipped ({e})")
 
 n_lines = sum(1 for _ in open(CORPUS_FILE, encoding="utf-8"))
 print(f"Corpus: {n_lines:,} lines  →  {CORPUS_FILE}")
 
 print(f"\nTraining BPE tokenizer  vocab_size={VOCAB_SIZE} ...")
 spm.SentencePieceTrainer.Train(
-    input=CORPUS_FILE,
-    model_prefix=MODEL_PREFIX,
-    model_type="bpe",
-    vocab_size=VOCAB_SIZE,
-    character_coverage=0.9999,  # high coverage for Twi special chars (ɛ ɔ ɑ)
-    pad_id=0,
-    unk_id=1,
-    bos_id=2,
-    eos_id=3,
-    pad_piece="<pad>",
-    unk_piece="<unk>",
-    bos_piece="<s>",
-    eos_piece="</s>",
-    num_threads=4,
+    input            = CORPUS_FILE,
+    model_prefix     = MODEL_PREFIX,
+    model_type       = "bpe",
+    vocab_size       = VOCAB_SIZE,
+    character_coverage = 0.9999,    # high coverage for Twi special chars (ɛ ɔ ɑ)
+    pad_id           = 0,
+    unk_id           = 1,
+    bos_id           = 2,
+    eos_id           = 3,
+    pad_piece        = "<pad>",
+    unk_piece        = "<unk>",
+    bos_piece        = "<s>",
+    eos_piece        = "</s>",
+    num_threads      = 4,
 )
 
-# ── 3. verify ─────────────────────────────────────────────────────────────────
 sp = spm.SentencePieceProcessor()
 sp.Load(f"{MODEL_PREFIX}.model")
 
