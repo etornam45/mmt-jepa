@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from model   import MMT_JEPA, ModelConfig
 from dataset import ObjB
+from tqdm import tqdm
 
 EPOCHS     = 50
 LR         = 3e-4
@@ -39,7 +40,7 @@ model.train()
 for epoch in range(EPOCHS):
     t0 = time.time()
     running = 0.0
-    for batch in loader:
+    for batch in tqdm(loader):
         if not batch: 
             continue
         b = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
