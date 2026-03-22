@@ -201,10 +201,10 @@ class ObjB(Dataset):
         # add more (repo, kwargs, eng_col, twi_col) here as datasets become available
     ]
 
-    def __init__(self, tokenizer, max_text: int = 256, reverse_prob: float = 0.5) -> None:
+    def __init__(self, tokenizer, cfg=None, max_text: int = 256, reverse_prob: float = 0.5) -> None:
         from datasets import load_dataset
         self.tok          = tokenizer
-        self.max_txt      = max_text
+        self.max_txt      = cfg.max_seq_len if cfg is not None else max_text
         self.reverse_prob = reverse_prob
         self.pairs: list[tuple[str, str]] = []
 
