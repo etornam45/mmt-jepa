@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from model   import MMT_JEPA, ModelConfig
 from dataset import ObjB
 
-EPOCHS     = 1
+EPOCHS     = 50
 LR         = 3e-4
 BATCH_SIZE = 32
 LOG_EVERY  = 50
