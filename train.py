@@ -1,7 +1,5 @@
 import math
 import time
-import itertools
-
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -29,16 +27,13 @@ if __name__ == "__main__":
 
     cfg = ModelConfig()
 
-    # separate loader per objective — keeps batches homogeneous
     loader_a = ObjA(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
     loader_b = ObjB(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
     loader_c = ObjC(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
 
-    # round-robin: one batch from A, one from B, one from C, repeat
-    loaders   = [loader_a, loader_b, loader_c]
-    iters     = [iter(l) for l in loaders]
+    loaders         = [loader_a, loader_b, loader_c]
     steps_per_epoch = sum(len(l) for l in loaders)
-    total     = steps_per_epoch * EPOCHS
+    total           = steps_per_epoch * EPOCHS
     print(f"Steps/epoch: {steps_per_epoch:,}  total: {total:,}")
 
     model = MMT_JEPA(cfg).to(device)
@@ -53,13 +48,13 @@ if __name__ == "__main__":
 
     step = 0
     model.train()
+
     for epoch in range(EPOCHS):
-        t0 = time.time()
-        running = 0.0
-        iters = [iter(l) for l in loaders]   # reset each epoch
+        t0       = time.time()
+        running  = 0.0
+        iters    = [iter(l) for l in loaders]
 
         for idx in tqdm(range(steps_per_epoch), desc=f"epoch {epoch+1}/{EPOCHS}"):
-            # pick loader round-robin, skip exhausted ones
             loader_idx = idx % len(loaders)
             try:
                 batch = next(iters[loader_idx])
@@ -88,9 +83,15 @@ if __name__ == "__main__":
             model.ema_step(total_steps=total)
 
             running += loss.item()
-            step += 1
-            if step % LOG_EVERY == 0:
-                print(f"\nstep {step:05d}  loss {loss.item():.4f}  lr {sched.get_last_lr()[0]:.2e}")
+            step    += 1
 
-        print(f"epoch {epoch+1}/{EPOCHS}  avg {running/steps_per_epoch:.4f}  {time.time()-t0:.0f}s")
+            if step % LOG_EVERY == 0:
+                with torch.no_grad():
+                    std = z_hat.std(dim=0).mean().item()
+                    cos = F.cosine_similarity(z_hat, z_tgt, dim=-1).mean().item()
+                flag = " COLLAPSE" if std < 0.01 or cos > 0.99 else ""
+                print(f"step {step:05d} {'ABC'[loader_idx]}  loss {loss.item():.4f}  std {std:.3f}  cos {cos:.3f}  lr {sched.get_last_lr()[0]:.2e}{flag}")
+
+        avg = running / max(1, steps_per_epoch)
+        print(f"epoch {epoch+1}/{EPOCHS}  avg_loss {avg:.4f}  {time.time()-t0:.0f}s")
         torch.save(model.state_dict(), f"checkpoints/epoch{epoch+1:03d}.pt")
