@@ -365,7 +365,7 @@ if __name__ == "__main__":
     print(f"Frozen (EMA target)  : {frozen:,}")
 
     # --- smoke test: one JEPA forward pass + EMA update ---
-    B, L, T = 32, 16, cfg.max_seq_len
+    B, L, T = 32, 16, 128
     dummy_text  = torch.randint(0, cfg.vocab_size, (B, L))
     dummy_audio = torch.randn(B, cfg.n_mels, T)
     src_lang = torch.zeros(B, dtype=torch.long)   # eng = 0
