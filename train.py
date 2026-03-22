@@ -1,12 +1,12 @@
 import math
 import time
+import itertools
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
-from dataset import ObjA, ObjB, ObjC, collate_fn
+from dataset import ObjA, ObjB, ObjC
 from model import MMT_JEPA, ModelConfig
 
 EPOCHS     = 50
@@ -29,18 +29,18 @@ if __name__ == "__main__":
 
     cfg = ModelConfig()
 
-    ds = ConcatDataset([ObjB(sp, cfg), ObjA(sp, cfg), ObjC(sp, cfg)])
-    print(f"Total samples: {len(ds):,}")
+    # separate loader per objective — keeps batches homogeneous
+    loader_a = ObjA(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
+    loader_b = ObjB(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
+    loader_c = ObjC(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
 
-    loader = DataLoader(
-        ds,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        collate_fn=collate_fn,
-        drop_last=True,
-    )
+    # round-robin: one batch from A, one from B, one from C, repeat
+    loaders   = [loader_a, loader_b, loader_c]
+    iters     = [iter(l) for l in loaders]
+    steps_per_epoch = sum(len(l) for l in loaders)
+    total     = steps_per_epoch * EPOCHS
+    print(f"Steps/epoch: {steps_per_epoch:,}  total: {total:,}")
 
-    total = len(loader) * EPOCHS
     model = MMT_JEPA(cfg).to(device)
     opt   = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -56,9 +56,18 @@ if __name__ == "__main__":
     for epoch in range(EPOCHS):
         t0 = time.time()
         running = 0.0
-        for batch in tqdm(loader, desc=f"epoch {epoch+1}/{EPOCHS}"):
+        iters = [iter(l) for l in loaders]   # reset each epoch
+
+        for idx in tqdm(range(steps_per_epoch), desc=f"epoch {epoch+1}/{EPOCHS}"):
+            # pick loader round-robin, skip exhausted ones
+            loader_idx = idx % len(loaders)
+            try:
+                batch = next(iters[loader_idx])
+            except StopIteration:
+                continue
             if not batch:
                 continue
+
             b = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                  for k, v in batch.items()}
 
@@ -83,5 +92,5 @@ if __name__ == "__main__":
             if step % LOG_EVERY == 0:
                 print(f"\nstep {step:05d}  loss {loss.item():.4f}  lr {sched.get_last_lr()[0]:.2e}")
 
-        print(f"epoch {epoch+1}/{EPOCHS}  avg {running/len(loader):.4f}  {time.time()-t0:.0f}s")
+        print(f"epoch {epoch+1}/{EPOCHS}  avg {running/steps_per_epoch:.4f}  {time.time()-t0:.0f}s")
         torch.save(model.state_dict(), f"checkpoints/epoch{epoch+1:03d}.pt")
