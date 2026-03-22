@@ -11,8 +11,8 @@ BATCH_SIZE = 32
 LOG_EVERY  = 50
 GRAD_CLIP  = 1.0
 
-device = torch.device("mps")
-
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
+print("Using device ", device)
 class _Tok:
     import sentencepiece as spm
     _sp = spm.SentencePieceProcessor()
