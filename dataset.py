@@ -71,8 +71,9 @@ def make_mel(audio, src_sr: int, cfg=None,
 class _LibriSpeech(Dataset):
     """English audio + transcript from openslr/librispeech_asr."""
     def __init__(self, tokenizer, cfg=None, max_text: int = 256, split: str = "train.100") -> None:
-        from datasets import load_dataset
-        self.ds      = load_dataset("openslr/librispeech_asr", "clean", split=split)
+        from datasets import Audio, load_dataset
+        ds = load_dataset("openslr/librispeech_asr", "clean", split=split)
+        self.ds      = ds.cast_column("audio", Audio(decode=False))
         self.tok     = tokenizer
         self.cfg     = cfg
         self.max_txt = cfg.max_seq_len if cfg is not None else max_text
@@ -82,7 +83,14 @@ class _LibriSpeech(Dataset):
 
     def __getitem__(self, i):
         row = self.ds[i]
-        mel = make_mel(row["audio"]["array"], row["audio"]["sampling_rate"], self.cfg)
+        try:
+            info = row["audio"]
+            raw  = info.get("bytes") or open(info["path"], "rb").read()
+            audio, sr = sf.read(io.BytesIO(raw))
+            audio = audio.astype(np.float32)
+        except Exception:
+            return None
+        mel = make_mel(audio, sr, self.cfg)
         if mel is None:
             return None
         ids = self.tok.encode(row["text"])[:self.max_txt]
