@@ -19,8 +19,8 @@ class ModelConfig:
     n_mods: int = 2  # text, audio
     dropout: float = 0.1
     ema_decay: float = 0.996
-    max_seq_len: int = 2048  # upper bound for PE cache
-
+    max_seq_len:  int   = 2048   # upper bound for PE cache
+    sample_rate:  int   = 16_000 # audio sample rate
 
 class SinusoidalPE(nn.Module):
     """

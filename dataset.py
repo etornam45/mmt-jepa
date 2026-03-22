@@ -35,12 +35,17 @@ TEXT, AUDIO = 0, 1
 PAD = 0
 
 
-def make_mel(audio, src_sr: int,
+def make_mel(audio, src_sr: int, cfg=None,
              target_sr: int = 16_000, n_mels: int = 80) -> Tensor | None:
     """
     audio: numpy array or torch Tensor, any shape — mono or stereo.
     Returns (n_mels, T) float32 tensor, z-score normalised. None if too long/short.
+    Accepts an optional ModelConfig; if provided, uses cfg.sample_rate and cfg.n_mels.
     """
+    if cfg is not None:
+        target_sr = cfg.sample_rate
+        n_mels    = cfg.n_mels
+
     if isinstance(audio, Tensor):
         y = audio.numpy()
     else:
@@ -65,18 +70,19 @@ def make_mel(audio, src_sr: int,
 
 class _LibriSpeech(Dataset):
     """English audio + transcript from openslr/librispeech_asr."""
-    def __init__(self, tokenizer, max_text: int = 256, split: str = "train.100") -> None:
+    def __init__(self, tokenizer, cfg=None, max_text: int = 256, split: str = "train.100") -> None:
         from datasets import load_dataset
         self.ds      = load_dataset("openslr/librispeech_asr", "clean", split=split)
         self.tok     = tokenizer
-        self.max_txt = max_text
+        self.cfg     = cfg
+        self.max_txt = cfg.max_seq_len if cfg is not None else max_text
         print(f"  LibriSpeech ({split}): {len(self.ds):,} utterances")
 
     def __len__(self):  return len(self.ds)
 
     def __getitem__(self, i):
         row = self.ds[i]
-        mel = make_mel(row["audio"]["array"], row["audio"]["sampling_rate"])
+        mel = make_mel(row["audio"]["array"], row["audio"]["sampling_rate"], self.cfg)
         if mel is None:
             return None
         ids = self.tok.encode(row["text"])[:self.max_txt]
@@ -90,9 +96,10 @@ class _TwiAudio(Dataset):
       1. BibleTTS local  (set bibletts_dir, expects train/<stem>.flac + .txt)
       2. ghananlpcommunity/twi-speech-text-multispeaker-16k  (HuggingFace)
     """
-    def __init__(self, tokenizer, split: str = "train", max_text: int = 256) -> None:
+    def __init__(self, tokenizer, cfg=None, split: str = "train", max_text: int = 256) -> None:
         self.tok     = tokenizer
-        self.max_txt = max_text
+        self.cfg     = cfg
+        self.max_txt = cfg.max_seq_len if cfg is not None else max_text
         self.records: list[dict] = []
 
         try:
@@ -126,7 +133,7 @@ class _TwiAudio(Dataset):
             audio = audio.astype(np.float32)
         except Exception:
             return None
-        mel = make_mel(audio, sr)
+        mel = make_mel(audio, sr, self.cfg)
         if mel is None:
             return None
         ids = self.tok.encode(rec["text"])[:self.max_txt]
@@ -148,10 +155,10 @@ class ObjA(Dataset):
     src_lang / tgt_lang / src_mod (=AUDIO) / tgt_mod (=TEXT)
     """
 
-    def __init__(self, tokenizer, max_text: int = 256) -> None:
+    def __init__(self, tokenizer, cfg=None, max_text: int = 256) -> None:
         print("ObjA sources:")
-        eng = _LibriSpeech(tokenizer, max_text)
-        twi = _TwiAudio(tokenizer, max_text=max_text)
+        eng = _LibriSpeech(tokenizer, cfg, max_text)
+        twi = _TwiAudio(tokenizer, cfg, max_text=max_text)
         self.ds = ConcatDataset([eng, twi])
 
     def __len__(self):  return len(self.ds)
@@ -160,8 +167,13 @@ class ObjA(Dataset):
         item = self.ds[i]
         if item is None:
             return None
-        return {**item, "src_mod": AUDIO, "tgt_mod": TEXT,
-                "src_lang": item["lang"], "tgt_lang": item["lang"]}
+        return {
+            "mel":     item["mel"],
+            "ctx_ids": item["ids"],   # audio is context
+            "tgt_ids": None,
+            "src_lang": item["lang"], "tgt_lang": item["lang"],
+            "src_mod": AUDIO, "tgt_mod": TEXT,
+        }
 
     def loader(self, batch_size: int = 32, num_workers: int = 0) -> DataLoader:
         return DataLoader(self, batch_size, shuffle=True, num_workers=num_workers,
@@ -246,10 +258,10 @@ class ObjC(Dataset):
     src_lang / tgt_lang / src_mod (=TEXT) / tgt_mod (=AUDIO)
     """
 
-    def __init__(self, tokenizer, max_text: int = 256) -> None:
+    def __init__(self, tokenizer, cfg=None, max_text: int = 256) -> None:
         print("ObjC sources:")
-        eng = _LibriSpeech(tokenizer, max_text)
-        twi = _TwiAudio(tokenizer, max_text=max_text)
+        eng = _LibriSpeech(tokenizer, cfg, max_text)
+        twi = _TwiAudio(tokenizer, cfg, max_text=max_text)
         self.ds = ConcatDataset([eng, twi])
 
     def __len__(self):  return len(self.ds)
@@ -258,12 +270,92 @@ class ObjC(Dataset):
         item = self.ds[i]
         if item is None:
             return None
-        return {**item, "src_mod": TEXT, "tgt_mod": AUDIO,
-                "src_lang": item["lang"], "tgt_lang": item["lang"]}
+        return {
+            "mel":     item["mel"],
+            "ctx_ids": item["ids"],   # text is context, same ids used for lookup
+            "tgt_ids": None,
+            "src_lang": item["lang"], "tgt_lang": item["lang"],
+            "src_mod": TEXT, "tgt_mod": AUDIO,
+        }
 
     def loader(self, batch_size: int = 32, num_workers: int = 0) -> DataLoader:
         return DataLoader(self, batch_size, shuffle=True, num_workers=num_workers,
                           collate_fn=_collate_text_audio, drop_last=True)
+
+
+def collate_fn(batch):
+    """
+    Unified collate for mixed ObjA + ObjB + ObjC batches.
+    All items share the same keys:
+        mel      : (n_mels, T) or None
+        ctx_ids  : (L,) token ids — context text/audio tokens
+        tgt_ids  : (L,) token ids — target text tokens (None for audio target)
+        src_mod / tgt_mod / src_lang / tgt_lang
+    """
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return {}
+
+    src_mod = torch.tensor([b["src_mod"] for b in batch])
+    tgt_mod = torch.tensor([b["tgt_mod"] for b in batch])
+    src_lang = torch.tensor([b["src_lang"] for b in batch])
+    tgt_lang = torch.tensor([b["tgt_lang"] for b in batch])
+
+    # ── audio (present when src_mod=AUDIO or tgt_mod=AUDIO) ──────────────────
+    has_mel = any(b["mel"] is not None for b in batch)
+    if has_mel:
+        mels   = [b["mel"] for b in batch if b["mel"] is not None]
+        max_T  = max(m.shape[1] for m in mels)
+        n_mels = mels[0].shape[0]
+        audio_pad  = torch.zeros(len(batch), n_mels, max_T)
+        audio_mask = torch.ones(len(batch), max_T, dtype=torch.bool)
+        mel_idx = 0
+        for i, b in enumerate(batch):
+            if b["mel"] is not None:
+                t = b["mel"].shape[1]
+                audio_pad[i, :, :t] = b["mel"]
+                audio_mask[i, :t]   = False
+                mel_idx += 1
+    else:
+        audio_pad = audio_mask = None
+
+    # ── context text (present when src_mod=TEXT) ──────────────────────────────
+    has_ctx_text = any(b["ctx_ids"] is not None and b["src_mod"] == TEXT for b in batch)
+    if has_ctx_text:
+        ctx_seqs  = [b["ctx_ids"] if (b["ctx_ids"] is not None and b["src_mod"] == TEXT)
+                     else torch.zeros(1, dtype=torch.long) for b in batch]
+        ctx_text  = pad_sequence(ctx_seqs, batch_first=True, padding_value=PAD)
+        ctx_tmask = ctx_text == PAD
+    else:
+        ctx_text = ctx_tmask = None
+
+    # ── target text (present when tgt_mod=TEXT) ───────────────────────────────
+    has_tgt_text = any(b["tgt_ids"] is not None and b["tgt_mod"] == TEXT for b in batch)
+    if has_tgt_text:
+        tgt_seqs  = [b["tgt_ids"] if (b["tgt_ids"] is not None and b["tgt_mod"] == TEXT)
+                     else torch.zeros(1, dtype=torch.long) for b in batch]
+        tgt_text  = pad_sequence(tgt_seqs, batch_first=True, padding_value=PAD)
+        tgt_tmask = tgt_text == PAD
+    else:
+        tgt_text = tgt_tmask = None
+
+    # route audio to ctx or tgt based on modality
+    is_audio_ctx = src_mod[0].item() == AUDIO if has_mel else False
+    ctx_audio    = audio_pad  if (has_mel and is_audio_ctx)  else None
+    tgt_audio    = audio_pad  if (has_mel and not is_audio_ctx) else None
+    ctx_amask    = audio_mask if (has_mel and is_audio_ctx)  else None
+    tgt_amask    = audio_mask if (has_mel and not is_audio_ctx) else None
+
+    return {
+        "ctx_audio":    ctx_audio,
+        "ctx_text":     ctx_text,
+        "tgt_audio":    tgt_audio,
+        "tgt_text":     tgt_text,
+        "ctx_pad_mask": ctx_amask if ctx_audio is not None else ctx_tmask,
+        "tgt_pad_mask": tgt_amask if tgt_audio is not None else tgt_tmask,
+        "src_lang": src_lang, "tgt_lang": tgt_lang,
+        "src_mod":  src_mod,  "tgt_mod":  tgt_mod,
+    }
 
 
 def _collate_audio_text(batch):
