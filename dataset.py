@@ -368,7 +368,7 @@ if __name__ == "__main__":
 
     tok = _Tok()
 
-    def _grab(ds, n=4):
+    def _grab(ds, n=12):
         items = []
         for i in range(min(len(ds), 200)):
             x = ds[i]
