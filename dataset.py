@@ -176,9 +176,9 @@ class ObjA(Dataset):
         if item is None:
             return None
         return {
-            "mel":     item["mel"],
-            "ctx_ids": item["ids"],   # audio is context
-            "tgt_ids": None,
+            "mel":     item["mel"],   # audio is context
+            "ctx_ids": None,
+            "tgt_ids": item["ids"],   # text is target
             "src_lang": item["lang"], "tgt_lang": item["lang"],
             "src_mod": AUDIO, "tgt_mod": TEXT,
         }
@@ -279,8 +279,8 @@ class ObjC(Dataset):
         if item is None:
             return None
         return {
-            "mel":     item["mel"],
-            "ctx_ids": item["ids"],   # text is context, same ids used for lookup
+            "mel":     item["mel"],   # audio is target
+            "ctx_ids": item["ids"],   # text is context
             "tgt_ids": None,
             "src_lang": item["lang"], "tgt_lang": item["lang"],
             "src_mod": TEXT, "tgt_mod": AUDIO,

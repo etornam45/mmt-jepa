@@ -36,7 +36,6 @@ if __name__ == "__main__":
         ds,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=4,
         collate_fn=collate_fn,
         drop_last=True,
     )
