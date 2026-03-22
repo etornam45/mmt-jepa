@@ -90,7 +90,7 @@ if __name__ == "__main__":
                     std = z_hat.std(dim=0).mean().item()
                     cos = F.cosine_similarity(z_hat, z_tgt, dim=-1).mean().item()
                 flag = " COLLAPSE" if std < 0.01 or cos > 0.99 else ""
-                print(f"step {step:05d} {'ABC'[loader_idx]}  loss {loss.item():.4f}  std {std:.3f}  cos {cos:.3f}  lr {sched.get_last_lr()[0]:.2e}{flag}")
+                print(f"\nstep {step:05d} {'ABC'[loader_idx]}  loss {loss.item():.4f}  std {std:.3f}  cos {cos:.3f}  lr {sched.get_last_lr()[0]:.2e}{flag}")
 
         avg = running / max(1, steps_per_epoch)
         print(f"epoch {epoch+1}/{EPOCHS}  avg_loss {avg:.4f}  {time.time()-t0:.0f}s")
