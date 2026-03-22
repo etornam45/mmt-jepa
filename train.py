@@ -7,7 +7,7 @@ from tqdm import tqdm
 from dataset import ObjA, ObjB, ObjC
 from model import MMT_JEPA, ModelConfig
 
-EPOCHS     = 5
+EPOCHS     = 10
 LR         = 3e-4
 BATCH_SIZE = 32 * 2
 LOG_EVERY  = 500
