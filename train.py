@@ -30,7 +30,7 @@ if __name__ == "__main__":
     cfg = ModelConfig()
 
     ds = ConcatDataset([ObjB(sp, cfg), ObjA(sp, cfg), ObjC(sp, cfg)])
-    print("Total samples:", len(ds))
+    print(f"Total samples: {len(ds):,}")
 
     loader = DataLoader(
         ds,
