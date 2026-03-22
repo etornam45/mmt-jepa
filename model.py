@@ -6,21 +6,44 @@ import math
 import copy
 
 
+def jepa_loss(z_hat: Tensor, z_tgt: Tensor, temp: float = 0.1, lam: float = 0.5) -> Tensor:
+    """
+    Combined MSE + InfoNCE loss as used in VL-JEPA.
+    Both inputs must already be L2-normalised.
+
+    lam : weight on InfoNCE (0 = pure MSE, 1 = pure InfoNCE)
+    temp: InfoNCE temperature — lower = sharper, more collapse-resistant
+    """
+    # alignment (MSE on unit vectors = 2 - 2*cos, bounded [0,4])
+    mse = F.mse_loss(z_hat, z_tgt)
+
+    # uniformity via InfoNCE
+    # logits: (B, B) — diagonal entries are positives
+    logits = torch.matmul(z_hat, z_tgt.T) / temp   # (B, B)
+    labels = torch.arange(logits.size(0), device=logits.device)
+    nce = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
+
+    return (1 - lam) * mse + lam * nce
+
+
 @dataclass
 class ModelConfig:
-    d_model: int = 512
-    n_heads: int = 8
-    trunk_layers: int = 6
-    pred_layers: int = 2  # narrow predictor
-    pred_dim: int = 256  # d_model // 2
-    vocab_size: int = 16_000
-    n_mels: int = 80
-    n_langs: int = 2  # eng, twi
-    n_mods: int = 2  # text, audio
-    dropout: float = 0.1
-    ema_decay: float = 0.996
+    d_model:      int   = 512
+    n_heads:      int   = 8
+    trunk_layers: int   = 6
+    pred_layers:  int   = 2      # narrow predictor
+    pred_dim:     int   = 256    # d_model // 2
+    vocab_size:   int   = 20_000
+    n_mels:       int   = 80
+    n_langs:      int   = 2      # eng, twi
+    n_mods:       int   = 2      # text, audio
+    dropout:      float = 0.1
+    ema_decay:    float = 0.996
     max_seq_len:  int   = 2048   # upper bound for PE cache
     sample_rate:  int   = 16_000 # audio sample rate
+    loss_temp:    float = 0.1    # InfoNCE temperature
+    loss_lam:     float = 0.5    # InfoNCE weight (0=MSE only, 1=NCE only)
+
 
 class SinusoidalPE(nn.Module):
     """
@@ -33,22 +56,20 @@ class SinusoidalPE(nn.Module):
     recomputation.
     """
 
-    def __init__(
-        self, d_model: int, max_seq_len: int = 2048, dropout: float = 0.1
-    ) -> None:
+    def __init__(self, d_model: int, max_seq_len: int = 2048, dropout: float = 0.1) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
 
         # build (max_seq_len, d_model) table once
-        pe = torch.zeros(max_seq_len, d_model)
-        pos = torch.arange(max_seq_len).unsqueeze(1)  # (L, 1)
+        pe    = torch.zeros(max_seq_len, d_model)
+        pos   = torch.arange(max_seq_len).unsqueeze(1)          # (L, 1)
         denom = torch.exp(
             torch.arange(0, d_model, 2) * (-math.log(10_000.0) / d_model)
-        )  # (d_model/2,)
+        )                                                        # (d_model/2,)
         pe[:, 0::2] = torch.sin(pos * denom)
         pe[:, 1::2] = torch.cos(pos * denom)
 
-        self.register_buffer("pe", pe.unsqueeze(0))  # (1, L, d_model)
+        self.register_buffer("pe", pe.unsqueeze(0))             # (1, L, d_model)
 
     def forward(self, x: Tensor) -> Tensor:
         # x: (B, T, d_model)
@@ -60,27 +81,27 @@ class AudioStem(nn.Module):
     def __init__(self, n_mels: int, d_model: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv1d(n_mels, d_model, 3, padding=1),  # (B, d, T)
+            nn.Conv1d(n_mels, d_model, 3, padding=1),            # (B, d, T)
             nn.SiLU(),
-            nn.Conv1d(d_model, d_model, 3, stride=2, padding=1),  # (B, d, T//2)
+            nn.Conv1d(d_model, d_model, 3, stride=2, padding=1), # (B, d, T//2)
         )
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: Tensor) -> Tensor:
         # x: (B, n_mels, T)
-        out = self.net(x)  # (B, d_model, T//2)
-        return self.norm(out.transpose(1, 2))  # (B, T//2, d_model)
+        out = self.net(x)                        # (B, d_model, T//2)
+        return self.norm(out.transpose(1, 2))    # (B, T//2, d_model)
 
 
 class TextStem(nn.Module):
     def __init__(self, d_model: int, vocab_size: int) -> None:
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model)
-        self.norm = nn.LayerNorm(d_model)
+        self.norm  = nn.LayerNorm(d_model)
 
     def forward(self, x: Tensor) -> Tensor:
         # x: (B, L) token ids
-        return self.norm(self.embed(x))  # (B, L, d_model)
+        return self.norm(self.embed(x))          # (B, L, d_model)
 
 
 class Shunt(nn.Module):
@@ -94,7 +115,7 @@ class Shunt(nn.Module):
             dim_feedforward=cfg.d_model * 4,
             dropout=cfg.dropout,
             batch_first=True,
-            norm_first=True,  # pre-norm: more stable for low-resource
+            norm_first=True,          # pre-norm: more stable for low-resource
             activation="gelu",
         )
         self.encoder = nn.TransformerEncoder(
@@ -121,9 +142,9 @@ class Predictor(nn.Module):
         pd = cfg.pred_dim
 
         self.lang_emb = nn.Embedding(cfg.n_langs, pd)
-        self.mod_emb = nn.Embedding(cfg.n_mods, pd)
+        self.mod_emb  = nn.Embedding(cfg.n_mods,  pd)
 
-        self.proj_in = nn.Linear(cfg.d_model, pd)
+        self.proj_in  = nn.Linear(cfg.d_model, pd)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=pd,
@@ -134,7 +155,7 @@ class Predictor(nn.Module):
             norm_first=True,
             activation="gelu",
         )
-        self.encoder = nn.TransformerEncoder(
+        self.encoder  = nn.TransformerEncoder(
             encoder_layer,
             num_layers=cfg.pred_layers,
             enable_nested_tensor=False,
@@ -143,22 +164,22 @@ class Predictor(nn.Module):
 
     def forward(
         self,
-        z_ctx: Tensor,  # (B, T, d_model)
-        src_lang: Tensor,  # (B,) int
-        src_mod: Tensor,  # (B,) int
-        tgt_lang: Tensor,  # (B,) int
-        tgt_mod: Tensor,  # (B,) int
+        z_ctx:    Tensor,   # (B, T, d_model)
+        src_lang: Tensor,   # (B,) int
+        src_mod:  Tensor,   # (B,) int
+        tgt_lang: Tensor,   # (B,) int
+        tgt_mod:  Tensor,   # (B,) int
     ) -> Tensor:
         cond = (
             self.lang_emb(src_lang)
             + self.mod_emb(src_mod)
             + self.lang_emb(tgt_lang)
             + self.mod_emb(tgt_mod)
-        ).unsqueeze(1)  # (B, 1, pd)
+        ).unsqueeze(1)                                          # (B, 1, pd)
 
-        x = torch.cat([cond, self.proj_in(z_ctx)], dim=1)  # (B, T+1, pd)
+        x = torch.cat([cond, self.proj_in(z_ctx)], dim=1)     # (B, T+1, pd)
         x = self.encoder(x)
-        return self.proj_out(x[:, 1:, :])  # (B, T, d_model)
+        return self.proj_out(x[:, 1:, :])                      # (B, T, d_model)
 
 
 class MMT_JEPA(nn.Module):
@@ -181,15 +202,15 @@ class MMT_JEPA(nn.Module):
         self.cfg = cfg
 
         self.audio_stem = AudioStem(cfg.n_mels, cfg.d_model)
-        self.text_stem = TextStem(cfg.d_model, cfg.vocab_size)
-        self.pe = SinusoidalPE(cfg.d_model, cfg.max_seq_len, cfg.dropout)
-        self.trunk = Shunt(cfg)
-        self.predictor = Predictor(cfg)
+        self.text_stem  = TextStem(cfg.d_model, cfg.vocab_size)
+        self.pe         = SinusoidalPE(cfg.d_model, cfg.max_seq_len, cfg.dropout)
+        self.trunk      = Shunt(cfg)
+        self.predictor  = Predictor(cfg)
 
         self.target_audio_stem = copy.deepcopy(self.audio_stem)
-        self.target_text_stem = copy.deepcopy(self.text_stem)
-        self.target_pe = copy.deepcopy(self.pe)
-        self.target_trunk = copy.deepcopy(self.trunk)
+        self.target_text_stem  = copy.deepcopy(self.text_stem)
+        self.target_pe         = copy.deepcopy(self.pe)
+        self.target_trunk      = copy.deepcopy(self.trunk)
         self._set_target_grad(False)
 
         self.register_buffer("ema_step_count", torch.tensor(0, dtype=torch.long))
@@ -219,9 +240,9 @@ class MMT_JEPA(nn.Module):
         Starts at ema_decay_base (≈0.99) and rises to cfg.ema_decay (0.996).
         Keeps the target responsive early, then stabilises it.
         """
-        base = max(0.0, self.cfg.ema_decay - 0.006)  # e.g. 0.990
-        peak = self.cfg.ema_decay  # 0.996
-        step = min(int(self.ema_step_count), total_steps)
+        base  = max(0.0, self.cfg.ema_decay - 0.006)   # e.g. 0.990
+        peak  = self.cfg.ema_decay                      # 0.996
+        step  = min(int(self.ema_step_count), total_steps)
         cos_v = math.cos(math.pi * step / total_steps)  # 1 → -1
         return peak - (peak - base) * (cos_v + 1) / 2  # base → peak
 
@@ -245,35 +266,32 @@ class MMT_JEPA(nn.Module):
 
     def encode(
         self,
-        text_ids: Tensor | None = None,  # (B, L)
+        text_ids:  Tensor | None = None,  # (B, L)
         audio_mel: Tensor | None = None,  # (B, n_mels, T)
-        pad_mask: Tensor | None = None,  # (B, S) bool — True where padded
+        pad_mask:  Tensor | None = None,  # (B, S) bool — True where padded
     ) -> Tensor:
         """Online encoder: stem → sinusoidal PE → shared trunk."""
-        assert (text_ids is None) != (audio_mel is None), (
+        assert (text_ids is None) != (audio_mel is None), \
             "Provide exactly one of text_ids or audio_mel."
-        )
-        x = (
-            self.text_stem(text_ids)
-            if text_ids is not None
-            else self.audio_stem(audio_mel)
-        )
+        x = self.text_stem(text_ids) if text_ids is not None else self.audio_stem(audio_mel)
         x = self.pe(x)
         return self.trunk(x, key_padding_mask=pad_mask)
 
     @torch.no_grad()
     def encode_target(
         self,
-        text_ids: Tensor | None = None,
+        text_ids:  Tensor | None = None,
         audio_mel: Tensor | None = None,
-        pad_mask: Tensor | None = None,
+        pad_mask:  Tensor | None = None,
     ) -> Tensor:
         """
         Target encoder: identical path through the EMA shadow copies.
+
+        Always runs under no_grad — the stop-gradient on z_tgt is structural,
+        not a .detach() call that can be accidentally removed.
         """
-        assert (text_ids is None) != (audio_mel is None), (
+        assert (text_ids is None) != (audio_mel is None), \
             "Provide exactly one of text_ids or audio_mel."
-        )
         x = (
             self.target_text_stem(text_ids)
             if text_ids is not None
@@ -292,23 +310,22 @@ class MMT_JEPA(nn.Module):
         """
         if pad_mask is not None:
             # pad_mask: (B, T) bool, True where padded
-            keep = (~pad_mask).unsqueeze(-1).float()  # (B, T, 1)
+            keep = (~pad_mask).unsqueeze(-1).float()   # (B, T, 1)
             return (z * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1)
         return z.mean(dim=1)
 
     def forward(
         self,
-        ctx_text: Tensor | None,
-        ctx_audio: Tensor | None,
-        tgt_text: Tensor | None,
-        tgt_audio: Tensor | None,
-        src_lang: Tensor,
-        src_mod: Tensor,
-        tgt_lang: Tensor,
-        tgt_mod: Tensor,
+        ctx_text:     Tensor | None,
+        ctx_audio:    Tensor | None,
+        tgt_text:     Tensor | None,
+        tgt_audio:    Tensor | None,
+        src_lang:     Tensor,
+        src_mod:      Tensor,
+        tgt_lang:     Tensor,
+        tgt_mod:      Tensor,
         ctx_pad_mask: Tensor | None = None,
         tgt_pad_mask: Tensor | None = None,
-        is_training: bool = True,
     ) -> tuple[Tensor, Tensor]:
         """
         Single forward pass for one JEPA objective.
@@ -327,47 +344,44 @@ class MMT_JEPA(nn.Module):
         """
         z_ctx = self.encode(ctx_text, ctx_audio, ctx_pad_mask)
         z_seq = self.predictor(z_ctx, src_lang, src_mod, tgt_lang, tgt_mod)
+        z_hat = self._pool(z_seq, ctx_pad_mask)
 
         z_full = self.encode_target(tgt_text, tgt_audio, tgt_pad_mask)
+        z_tgt  = self._pool(z_full, tgt_pad_mask)
 
-        if is_training:
-            z_hat = self._pool(z_seq, ctx_pad_mask)
-            z_tgt = self._pool(z_full, tgt_pad_mask)
+        # L2-normalise before loss — keeps MSE scale-invariant across modalities
+        z_hat = F.normalize(z_hat, dim=-1)
+        z_tgt = F.normalize(z_tgt, dim=-1)
 
-            return z_hat, z_tgt
-        else:
-            return z_seq, z_full
+        return z_hat, z_tgt
 
 
 if __name__ == "__main__":
-    cfg = ModelConfig()
+    cfg   = ModelConfig()
     model = MMT_JEPA(cfg)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    frozen    = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     print(model)
     print(f"\nTrainable parameters : {trainable:,}")
     print(f"Frozen (EMA target)  : {frozen:,}")
 
-    B, L, T = 12, 16, 128
-    dummy_text = torch.randint(0, cfg.vocab_size, (B, L))
+    # --- smoke test: one JEPA forward pass + EMA update ---
+    B, L, T = 2, 16, 128
+    dummy_text  = torch.randint(0, cfg.vocab_size, (B, L))
     dummy_audio = torch.randn(B, cfg.n_mels, T)
-    src_lang = torch.zeros(B, dtype=torch.long)  # eng = 0
-    tgt_lang = torch.ones(B, dtype=torch.long)  # twi = 1
-    src_mod = torch.zeros(B, dtype=torch.long)  # text = 0
-    tgt_mod = torch.ones(B, dtype=torch.long)  # audio = 1
+    src_lang = torch.zeros(B, dtype=torch.long)   # eng = 0
+    tgt_lang = torch.ones(B,  dtype=torch.long)   # twi = 1
+    src_mod  = torch.zeros(B, dtype=torch.long)   # text = 0
+    tgt_mod  = torch.ones(B,  dtype=torch.long)   # audio = 1
 
     z_hat, z_tgt = model(
-        ctx_text=dummy_text,
-        ctx_audio=None,
-        tgt_text=None,
-        tgt_audio=dummy_audio,
-        src_lang=src_lang,
-        src_mod=src_mod,
-        tgt_lang=tgt_lang,
-        tgt_mod=tgt_mod,
+        ctx_text=dummy_text, ctx_audio=None,
+        tgt_text=None,       tgt_audio=dummy_audio,
+        src_lang=src_lang,   src_mod=src_mod,
+        tgt_lang=tgt_lang,   tgt_mod=tgt_mod,
     )
-    loss = F.mse_loss(z_hat, z_tgt)
+    loss  = F.mse_loss(z_hat, z_tgt)
     loss.backward()
 
     decay = model.ema_step(total_steps=50_000)
