@@ -306,10 +306,12 @@ def _collate_audio_text(batch):
         ctx_audio[i, :, :t] = b["mel"]
         ctx_mask[i, :t]     = False
     tgt_text = pad_sequence([b["tgt_ids"] for b in batch], batch_first=True, padding_value=PAD)
+    # AudioStem has stride-2 conv: output length = ceil(T/2). Downsample mask to match.
+    ctx_mask_ds = ctx_mask[:, ::2]
     return {
         "ctx_audio": ctx_audio, "ctx_text": None,
         "tgt_audio": None,      "tgt_text": tgt_text,
-        "ctx_pad_mask": ctx_mask, "tgt_pad_mask": tgt_text == PAD,
+        "ctx_pad_mask": ctx_mask_ds, "tgt_pad_mask": tgt_text == PAD,
         "src_lang": torch.tensor([b["src_lang"] for b in batch]),
         "tgt_lang": torch.tensor([b["tgt_lang"] for b in batch]),
         "src_mod":  torch.tensor([b["src_mod"]  for b in batch]),
@@ -349,10 +351,12 @@ def _collate_text_audio(batch):
         t = b["mel"].shape[1]
         tgt_audio[i, :, :t] = b["mel"]
         tgt_mask[i, :t]     = False
+    # AudioStem has stride-2 conv: output length = ceil(T/2). Downsample mask to match.
+    tgt_mask_ds = tgt_mask[:, ::2]
     return {
         "ctx_audio": None,      "ctx_text": ctx_text,
         "tgt_audio": tgt_audio, "tgt_text": None,
-        "ctx_pad_mask": ctx_text == PAD, "tgt_pad_mask": tgt_mask,
+        "ctx_pad_mask": ctx_text == PAD, "tgt_pad_mask": tgt_mask_ds,
         "src_lang": torch.tensor([b["src_lang"] for b in batch]),
         "tgt_lang": torch.tensor([b["tgt_lang"] for b in batch]),
         "src_mod":  torch.tensor([b["src_mod"]  for b in batch]),
