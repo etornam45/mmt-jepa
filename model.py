@@ -31,18 +31,16 @@ class ModelConfig:
     d_model:      int   = 512
     n_heads:      int   = 8
     trunk_layers: int   = 6
-    pred_layers:  int   = 2      # narrow predictor
-    pred_dim:     int   = 256    # d_model // 2
-    vocab_size:   int   = 20_000
+    pred_layers:  int   = 12      # narrow predictor
+    pred_dim:     int   = 512    # d_model // 2
+    vocab_size:   int   = 16_000
     n_mels:       int   = 80
     n_langs:      int   = 2      # eng, twi
     n_mods:       int   = 2      # text, audio
-    dropout:      float = 0.1
+    dropout:      float = 0.15
     ema_decay:    float = 0.996
-    max_seq_len:  int   = 2048   # upper bound for PE cache
+    max_seq_len:  int   = 900   # upper bound for PE cache
     sample_rate:  int   = 16_000 # audio sample rate
-    loss_temp:    float = 0.1    # InfoNCE temperature
-    loss_lam:     float = 0.5    # InfoNCE weight (0=MSE only, 1=NCE only)
 
 
 class SinusoidalPE(nn.Module):
@@ -367,7 +365,7 @@ if __name__ == "__main__":
     print(f"Frozen (EMA target)  : {frozen:,}")
 
     # --- smoke test: one JEPA forward pass + EMA update ---
-    B, L, T = 2, 16, 128
+    B, L, T = 32, 16, cfg.max_seq_len
     dummy_text  = torch.randint(0, cfg.vocab_size, (B, L))
     dummy_audio = torch.randn(B, cfg.n_mels, T)
     src_lang = torch.zeros(B, dtype=torch.long)   # eng = 0
