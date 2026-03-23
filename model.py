@@ -31,7 +31,7 @@ class ModelConfig:
     d_model:      int   = 512
     n_heads:      int   = 8
     trunk_layers: int   = 6
-    pred_layers:  int   = 12      # narrow predictor
+    pred_layers:  int   = 6      # narrow predictor
     pred_dim:     int   = 512    # d_model // 2
     vocab_size:   int   = 16_000
     n_mels:       int   = 80
