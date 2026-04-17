@@ -23,7 +23,7 @@ if __name__ == "__main__":
 
     import sentencepiece as spm
     sp = spm.SentencePieceProcessor()
-    sp.Load("model/tokenizer.model")
+    sp.Load("tokenizer/tokenizer.model")
 
     cfg = ModelConfig()
 

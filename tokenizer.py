@@ -12,7 +12,7 @@ from datasets import load_dataset
 import sentencepiece as spm
 
 VOCAB_SIZE   = 16_000 
-MODEL_PREFIX = "model/tokenizer"
+MODEL_PREFIX = "tokenizer/tokenizer"
 CORPUS_FILE  = "corpus.txt"
 
 SOURCES = [
