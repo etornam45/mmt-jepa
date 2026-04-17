@@ -10,3 +10,10 @@ wheels/
 .venv
 model
 corpus.txt
+
+tokenizer
+checkpoint
+
+
+# Dotfiles
+.cursor

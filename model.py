@@ -31,8 +31,13 @@ class ModelConfig:
     d_model:      int   = 512
     n_heads:      int   = 8
     trunk_layers: int   = 6
+    
     pred_layers:  int   = 6      # narrow predictor
     pred_dim:     int   = 512    # d_model // 2
+
+    dec_layers:   int   = 4
+    dec_dim:      int   = 512
+
     vocab_size:   int   = 16_000
     n_mels:       int   = 80
     n_langs:      int   = 2      # eng, twi
@@ -363,8 +368,9 @@ if __name__ == "__main__":
     print(model)
     print(f"\nTrainable parameters : {trainable:,}")
     print(f"Frozen (EMA target)  : {frozen:,}")
+    print(f"Total parameters : {(trainable + frozen):,}")
 
-    # --- smoke test: one JEPA forward pass + EMA update ---
+    
     B, L, T = 32, 16, 128
     dummy_text  = torch.randint(0, cfg.vocab_size, (B, L))
     dummy_audio = torch.randn(B, cfg.n_mels, T)
