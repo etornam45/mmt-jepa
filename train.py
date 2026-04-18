@@ -32,7 +32,7 @@ if __name__ == "__main__":
     loader_c = ObjC(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
 
     loaders         = [loader_a, loader_b, loader_c]
-    steps_per_epoch = sum(len(l) for l in loaders)
+    steps_per_epoch = sum(len(loader) for loader in loaders)
     total           = steps_per_epoch * EPOCHS
     print(f"Steps/epoch: {steps_per_epoch:,}  total: {total:,}")
 
@@ -52,7 +52,7 @@ if __name__ == "__main__":
     for epoch in range(EPOCHS):
         t0       = time.time()
         running  = 0.0
-        iters    = [iter(l) for l in loaders]
+        iters    = [iter(loader) for loader in loaders]
 
         for idx in tqdm(range(steps_per_epoch), desc=f"epoch {epoch+1}/{EPOCHS}"):
             loader_idx = idx % len(loaders)
