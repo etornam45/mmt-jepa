@@ -85,10 +85,10 @@ def forward_obj(
     raise ValueError(f"Unknown objective: {obj!r}")
 
 
-def maybe_load_jepa_checkpoint(model: Decoder, ckpt_path: str | None) -> None:
+def maybe_load_jepa_checkpoint(model: Decoder, ckpt_path: str | None, device) -> None:
     if not ckpt_path:
         return
-    state = torch.load(ckpt_path, map_location="cpu")
+    state = torch.load(ckpt_path, map_location=device)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
     missing, unexpected = model.load_state_dict(state, strict=False)
@@ -124,7 +124,7 @@ if __name__ == "__main__":
     print(f"Steps/epoch: {steps_per_epoch:,}  total: {total_steps:,}")
 
     base  = MMT_JEPA(cfg)
-    maybe_load_jepa_checkpoint(base, JEPA_CKPT)
+    maybe_load_jepa_checkpoint(base, JEPA_CKPT, device)
     model = Decoder(cfg, base, freeze_jepa=FREEZE_JEPA).to(device)
     del base
 
