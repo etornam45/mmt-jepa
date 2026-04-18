@@ -6,15 +6,15 @@ from model import MMT_JEPA, ModelConfig
 from typing import Literal
 
 
-LANG_TO_ID = {"eng": 0, "ewe": 1}
+LANG_TO_ID = {"eng": 0, "twi": 1}
 MOD_TO_ID = {"text": 0, "audio": 1}
 
 
 def build_io_ids(
     batch_size: int,
     device: torch.device,
-    src_lang: Literal["eng", "ewe"],
-    tgt_lang: Literal["eng", "ewe"],
+    src_lang: Literal["eng", "twi"],
+    tgt_lang: Literal["eng", "twi"],
     src_mod: Literal["text", "audio"],
     tgt_mod: Literal["text", "audio"],
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -68,19 +68,25 @@ class TextDecoder(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=cfg.dec_layers)
 
         self.to_lang = nn.Embedding(cfg.n_langs, cfg.dec_dim)
-        self.to_mod = nn.Embedding(cfg.n_mods, cfg.dec_dim)
+        self.to_mod  = nn.Embedding(cfg.n_mods,  cfg.dec_dim)
+        self.lm_head = nn.Linear(cfg.dec_dim, cfg.vocab_size, bias=False)
 
     def forward(
         self,
-        tgt_text_emb: Tensor,   # (B, L, d_model) — target-side embeddings for teacher forcing
-        z_hat: Tensor,
-        out_mod: Tensor,
-        out_lang: Tensor,
-    ) -> Tensor:
+        tgt_text_emb: Tensor,   # (B, L, d_model) — shifted-right target embeddings
+        z_hat: Tensor,          # (B, S, d_model) — encoder memory
+        out_mod: Tensor,        # (B,) int
+        out_lang: Tensor,       # (B,) int
+    ) -> Tensor:                # (B, L, vocab_size) logits
+        L = tgt_text_emb.size(1)
+        causal_mask = nn.Transformer.generate_square_subsequent_mask(
+            L, device=tgt_text_emb.device
+        )
         lang = self.to_lang(out_lang).unsqueeze(1)
-        mod = self.to_mod(out_mod).unsqueeze(1)
-        tgt_text_emb = lang + mod + tgt_text_emb   # (B, L, d_model)
-        return self.decoder(tgt_text_emb, z_hat)    # (B, L, d_model)
+        mod  = self.to_mod(out_mod).unsqueeze(1)
+        tgt  = lang + mod + tgt_text_emb               # (B, L, d_model)
+        out  = self.decoder(tgt, z_hat, tgt_mask=causal_mask)  # (B, L, d_model)
+        return self.lm_head(out)                        # (B, L, vocab_size)
 
 
 class AudioDecoder(nn.Module):
@@ -195,7 +201,9 @@ class Decoder(nn.Module):
         if tgt_mod_id == 0:
             if tgt_text_ids is None:
                 raise ValueError("tgt_text_ids is required when decoding target text.")
-            return self.text_decoder(self.text_stem(tgt_text_ids), z_hat, tgt_mod, tgt_lang)
+            # Shift right for teacher forcing: feed ids[:-1], predict ids[1:]
+            tgt_in = self.text_stem(tgt_text_ids[:, :-1])          # (B, L-1, d_model)
+            return self.text_decoder(tgt_in, z_hat, tgt_mod, tgt_lang)  # (B, L-1, vocab_size)
 
         if tgt_mod_id == 1:
             target_len = audio_mel.size(-1) if audio_mel is not None else None
@@ -224,9 +232,9 @@ if __name__ == "__main__":
         batch_size=B,
         device=device,
         src_lang="eng",
-        tgt_lang="ewe",
+        tgt_lang="twi",
         src_mod="audio",
-        tgt_mod="text",
+        tgt_mod="audio",
     )
 
     text_pred = decoder.forward(
