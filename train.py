@@ -4,14 +4,16 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from config import TinyMMT_JEPAConfig
 from dataset import ObjA, ObjB, ObjC
-from model import MMT_JEPA, ModelConfig
+from model import MMT_JEPA
 
 EPOCHS     = 10
 LR         = 3e-4
 BATCH_SIZE = 32
 LOG_EVERY  = 500
 GRAD_CLIP  = 1.0
+MAX_SAMPLES = 1000
 
 if __name__ == "__main__":
     device = torch.device(
@@ -25,11 +27,11 @@ if __name__ == "__main__":
     sp = spm.SentencePieceProcessor()
     sp.Load("tokenizer/tokenizer.model")
 
-    cfg = ModelConfig()
+    cfg = TinyMMT_JEPAConfig()
 
-    loader_a = ObjA(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
-    loader_b = ObjB(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
-    loader_c = ObjC(sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
+    loader_a = ObjA(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
+    loader_b = ObjB(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
+    loader_c = ObjC(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
 
     loaders         = [loader_a, loader_b, loader_c]
     steps_per_epoch = sum(len(loader) for loader in loaders)

@@ -2,7 +2,7 @@
 MMT-JEPA datasets — one class per JEPA objective.
 
     ObjA  Audio -> Text   (both languages)
-          English: openslr/librispeech_asr  train.100
+          English: openslr/librispeech_asr  validation  (default; was train.100)
           Twi:     ghananlpcommunity/twi-speech-text-multispeaker-16k
                    + BibleTTS local (openslr.org/129)
 
@@ -12,11 +12,16 @@ MMT-JEPA datasets — one class per JEPA objective.
     ObjC  Text -> Audio   (both languages)
           Same audio sources as ObjA, direction flipped
 
-Quick start:
-    tok = MyTokenizer()          # any object with .encode(str) -> list[int]
+Quick start (full data):
+    tok = MyTokenizer()
     for batch in ObjA(tok).loader(): ...
     for batch in ObjB(tok).loader(): ...
     for batch in ObjC(tok).loader(): ...
+
+Quick start (proof-of-concept, small):
+    for batch in ObjA(tok, max_samples=500).loader(batch_size=16): ...
+    for batch in ObjB(tok, max_samples=1000).loader(batch_size=16): ...
+    for batch in ObjC(tok, max_samples=500).loader(batch_size=16): ...
 """
 
 from __future__ import annotations
@@ -68,18 +73,43 @@ def make_mel(audio, src_sr: int, cfg=None,
     return (mel_t - mel_t.mean()) / (mel_t.std() + 1e-6)
 
 
+
 class _LibriSpeech(Dataset):
-    """English audio + transcript from openslr/librispeech_asr."""
-    def __init__(self, tokenizer, cfg=None, max_text: int = 256, split: str = "train.100") -> None:
+    """
+    English audio + transcript from openslr/librispeech_asr.
+
+    Parameters
+    ----------
+    split       : HuggingFace split name.
+                  'validation' (~2.7k utterances) is recommended for POC runs.
+                  'train.100' (~28k) for full training.
+    max_samples : if set, only the first N utterances are kept after loading.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        cfg=None,
+        max_text: int = 256,
+        split: str = "validation",
+        max_samples: int | None = None,
+    ) -> None:
         from datasets import Audio, load_dataset
+
         ds = load_dataset("openslr/librispeech_asr", "clean", split=split)
+
+        if max_samples is not None:
+            ds = ds.select(range(min(max_samples, len(ds))))
+
         self.ds      = ds.cast_column("audio", Audio(decode=False))
         self.tok     = tokenizer
         self.cfg     = cfg
         self.max_txt = cfg.max_seq_len if cfg is not None else max_text
-        print(f"  LibriSpeech ({split}): {len(self.ds):,} utterances")
+        print(f"  LibriSpeech ({split}): {len(self.ds):,} utterances"
+              + (f"  [capped at {max_samples}]" if max_samples else ""))
 
-    def __len__(self):  return len(self.ds)
+    def __len__(self):
+        return len(self.ds)
 
     def __getitem__(self, i):
         row = self.ds[i]
@@ -103,8 +133,20 @@ class _TwiAudio(Dataset):
     Sources:
       1. BibleTTS local  (set bibletts_dir, expects train/<stem>.flac + .txt)
       2. ghananlpcommunity/twi-speech-text-multispeaker-16k  (HuggingFace)
+
+    Parameters
+    ----------
+    max_samples : if set, records list is trimmed to N after loading all sources.
     """
-    def __init__(self, tokenizer, cfg=None, split: str = "train", max_text: int = 256) -> None:
+
+    def __init__(
+        self,
+        tokenizer,
+        cfg=None,
+        split: str = "train",
+        max_text: int = 256,
+        max_samples: int | None = None,
+    ) -> None:
         self.tok     = tokenizer
         self.cfg     = cfg
         self.max_txt = cfg.max_seq_len if cfg is not None else max_text
@@ -117,7 +159,12 @@ class _TwiAudio(Dataset):
             ds = ds.cast_column("audio", Audio(decode=False))
             before = len(self.records)
             for row in ds:
-                text = (row.get("text") or row.get("sentence") or row.get("transcription") or "").strip()
+                text = (
+                    row.get("text")
+                    or row.get("sentence")
+                    or row.get("transcription")
+                    or ""
+                ).strip()
                 if not text:
                     continue
                 info = row["audio"]
@@ -127,12 +174,17 @@ class _TwiAudio(Dataset):
         except Exception as e:
             print(f"  Twi HuggingFace skipped ({e})")
 
+        if max_samples is not None and len(self.records) > max_samples:
+            self.records = self.records[:max_samples]
+            print(f"  Twi records capped at {max_samples}")
+
         assert self.records, (
             "No Twi audio found.\n"
-            "  Set bibletts_dir to your BibleTTS extract or ensure internet access."
+            "  Ensure internet access for the HuggingFace dataset, or set bibletts_dir."
         )
 
-    def __len__(self):  return len(self.records)
+    def __len__(self):
+        return len(self.records)
 
     def __getitem__(self, i):
         rec = self.records[i]
@@ -150,6 +202,7 @@ class _TwiAudio(Dataset):
         return {"mel": mel, "ids": torch.tensor(ids, dtype=torch.long), "lang": TWI}
 
 
+
 class ObjA(Dataset):
     """
     Context : audio  (English or Twi)
@@ -157,49 +210,75 @@ class ObjA(Dataset):
 
     Batch keys
     ----------
-    ctx_audio (B, 80, T) | ctx_text None
-    tgt_text  (B, L)     | tgt_audio None
-    ctx_pad_mask (B, T)  | tgt_pad_mask (B, L)
+    ctx_audio    (B, 80, T)  |  ctx_text     None
+    tgt_text     (B, L)      |  tgt_audio    None
+    ctx_pad_mask (B, T//2)   |  tgt_pad_mask (B, L)
     src_lang / tgt_lang / src_mod (=AUDIO) / tgt_mod (=TEXT)
+
+    Parameters
+    ----------
+    max_samples : cap applied independently to each source (English + Twi).
+    libri_split : LibriSpeech split; 'validation' for POC, 'train.100' for full.
     """
 
-    def __init__(self, tokenizer, cfg=None, max_text: int = 256) -> None:
+    def __init__(
+        self,
+        tokenizer,
+        cfg=None,
+        max_text: int = 256,
+        max_samples: int | None = None,
+        libri_split: str = "validation",
+    ) -> None:
         print("ObjA sources:")
-        eng = _LibriSpeech(tokenizer, cfg, max_text)
-        twi = _TwiAudio(tokenizer, cfg, max_text=max_text)
+        eng = _LibriSpeech(tokenizer, cfg, max_text,
+                           split=libri_split, max_samples=max_samples)
+        twi = _TwiAudio(tokenizer, cfg, max_text=max_text,
+                        max_samples=max_samples)
         self.ds = ConcatDataset([eng, twi])
 
-    def __len__(self):  return len(self.ds)
+    def __len__(self):
+        return len(self.ds)
 
     def __getitem__(self, i):
         item = self.ds[i]
         if item is None:
             return None
         return {
-            "mel":     item["mel"],   # audio is context
-            "ctx_ids": None,
-            "tgt_ids": item["ids"],   # text is target
-            "src_lang": item["lang"], "tgt_lang": item["lang"],
-            "src_mod": AUDIO, "tgt_mod": TEXT,
+            "mel":      item["mel"],    # audio is context
+            "ctx_ids":  None,
+            "tgt_ids":  item["ids"],    # text is target
+            "src_lang": item["lang"],
+            "tgt_lang": item["lang"],
+            "src_mod":  AUDIO,
+            "tgt_mod":  TEXT,
         }
 
     def loader(self, batch_size: int = 32, num_workers: int = 0) -> DataLoader:
-        return DataLoader(self, batch_size, shuffle=True, num_workers=num_workers,
-                          collate_fn=_collate_audio_text, drop_last=True)
+        return DataLoader(
+            self, batch_size, shuffle=True,
+            num_workers=num_workers,
+            collate_fn=_collate_audio_text,
+            drop_last=True,
+        )
 
 
 class ObjB(Dataset):
     """
     Context : text  (English or Twi)
-    Target  : text  (other language)
+    Target  : text  (other language — translation)
     Direction randomly flipped each call so model sees both eng->twi and twi->eng.
 
     Batch keys
     ----------
-    ctx_audio None | ctx_text (B, L)
-    tgt_audio None | tgt_text (B, L)
-    ctx_pad_mask (B, L) | tgt_pad_mask (B, L)
+    ctx_audio    None        |  ctx_text     (B, L)
+    tgt_audio    None        |  tgt_text     (B, L)
+    ctx_pad_mask (B, L)      |  tgt_pad_mask (B, L)
     src_lang / tgt_lang / src_mod (=TEXT) / tgt_mod (=TEXT)
+
+    Parameters
+    ----------
+    max_samples  : total pairs kept across all sources (applied after loading).
+    reverse_prob : probability of flipping to twi->eng direction per sample.
     """
 
     SOURCES = [
@@ -209,8 +288,16 @@ class ObjB(Dataset):
         # add more (repo, kwargs, eng_col, twi_col) here as datasets become available
     ]
 
-    def __init__(self, tokenizer, cfg=None, max_text: int = 256, reverse_prob: float = 0.5) -> None:
+    def __init__(
+        self,
+        tokenizer,
+        cfg=None,
+        max_text: int = 256,
+        max_samples: int | None = None,
+        reverse_prob: float = 0.5,
+    ) -> None:
         from datasets import load_dataset
+
         self.tok          = tokenizer
         self.max_txt      = cfg.max_seq_len if cfg is not None else max_text
         self.reverse_prob = reverse_prob
@@ -230,9 +317,15 @@ class ObjB(Dataset):
             except Exception as e:
                 print(f"  {repo.split('/')[1]} skipped ({e})")
 
+        if max_samples is not None and len(self.pairs) > max_samples:
+            random.shuffle(self.pairs)           # shuffle before capping for variety
+            self.pairs = self.pairs[:max_samples]
+            print(f"  ObjB pairs capped at {max_samples}")
+
         assert self.pairs, "ObjB: no data loaded — check internet or sources list"
 
-    def __len__(self):  return len(self.pairs)
+    def __len__(self):
+        return len(self.pairs)
 
     def __getitem__(self, i):
         eng, twi = self.pairs[i]
@@ -241,15 +334,21 @@ class ObjB(Dataset):
         else:
             ctx, tgt, sl, tl = eng, twi, ENG, TWI
         return {
-            "ctx_ids": torch.tensor(self.tok.encode(ctx)[:self.max_txt], dtype=torch.long),
-            "tgt_ids": torch.tensor(self.tok.encode(tgt)[:self.max_txt], dtype=torch.long),
-            "src_lang": sl, "tgt_lang": tl,
-            "src_mod": TEXT, "tgt_mod": TEXT,
+            "ctx_ids":  torch.tensor(self.tok.encode(ctx)[:self.max_txt], dtype=torch.long),
+            "tgt_ids":  torch.tensor(self.tok.encode(tgt)[:self.max_txt], dtype=torch.long),
+            "src_lang": sl,
+            "tgt_lang": tl,
+            "src_mod":  TEXT,
+            "tgt_mod":  TEXT,
         }
 
     def loader(self, batch_size: int = 32, num_workers: int = 0) -> DataLoader:
-        return DataLoader(self, batch_size, shuffle=True, num_workers=num_workers,
-                          collate_fn=_collate_text_text, drop_last=True)
+        return DataLoader(
+            self, batch_size, shuffle=True,
+            num_workers=num_workers,
+            collate_fn=_collate_text_text,
+            drop_last=True,
+        )
 
 
 class ObjC(Dataset):
@@ -260,35 +359,56 @@ class ObjC(Dataset):
 
     Batch keys
     ----------
-    ctx_audio None  | ctx_text (B, L)
-    tgt_audio (B, 80, T) | tgt_text None
-    ctx_pad_mask (B, L)  | tgt_pad_mask (B, T)
+    ctx_audio    None        |  ctx_text     (B, L)
+    tgt_audio    (B, 80, T)  |  tgt_text     None
+    ctx_pad_mask (B, L)      |  tgt_pad_mask (B, T//2)
     src_lang / tgt_lang / src_mod (=TEXT) / tgt_mod (=AUDIO)
+
+    Parameters
+    ----------
+    max_samples : cap applied independently to each source (English + Twi).
+    libri_split : LibriSpeech split; 'validation' for POC, 'train.100' for full.
     """
 
-    def __init__(self, tokenizer, cfg=None, max_text: int = 256) -> None:
+    def __init__(
+        self,
+        tokenizer,
+        cfg=None,
+        max_text: int = 256,
+        max_samples: int | None = None,
+        libri_split: str = "validation",
+    ) -> None:
         print("ObjC sources:")
-        eng = _LibriSpeech(tokenizer, cfg, max_text)
-        twi = _TwiAudio(tokenizer, cfg, max_text=max_text)
+        eng = _LibriSpeech(tokenizer, cfg, max_text,
+                           split=libri_split, max_samples=max_samples)
+        twi = _TwiAudio(tokenizer, cfg, max_text=max_text,
+                        max_samples=max_samples)
         self.ds = ConcatDataset([eng, twi])
 
-    def __len__(self):  return len(self.ds)
+    def __len__(self):
+        return len(self.ds)
 
     def __getitem__(self, i):
         item = self.ds[i]
         if item is None:
             return None
         return {
-            "mel":     item["mel"],   # audio is target
-            "ctx_ids": item["ids"],   # text is context
-            "tgt_ids": None,
-            "src_lang": item["lang"], "tgt_lang": item["lang"],
-            "src_mod": TEXT, "tgt_mod": AUDIO,
+            "mel":      item["mel"],    # audio is target
+            "ctx_ids":  item["ids"],    # text is context
+            "tgt_ids":  None,
+            "src_lang": item["lang"],
+            "tgt_lang": item["lang"],
+            "src_mod":  TEXT,
+            "tgt_mod":  AUDIO,
         }
 
     def loader(self, batch_size: int = 32, num_workers: int = 0) -> DataLoader:
-        return DataLoader(self, batch_size, shuffle=True, num_workers=num_workers,
-                          collate_fn=_collate_text_audio, drop_last=True)
+        return DataLoader(
+            self, batch_size, shuffle=True,
+            num_workers=num_workers,
+            collate_fn=_collate_text_audio,
+            drop_last=True,
+        )
 
 
 
@@ -305,13 +425,18 @@ def _collate_audio_text(batch):
         t = b["mel"].shape[1]
         ctx_audio[i, :, :t] = b["mel"]
         ctx_mask[i, :t]     = False
-    tgt_text = pad_sequence([b["tgt_ids"] for b in batch], batch_first=True, padding_value=PAD)
+    tgt_text = pad_sequence(
+        [b["tgt_ids"] for b in batch], batch_first=True, padding_value=PAD
+    )
     # AudioStem has stride-2 conv: output length = ceil(T/2). Downsample mask to match.
     ctx_mask_ds = ctx_mask[:, ::2]
     return {
-        "ctx_audio": ctx_audio, "ctx_text": None,
-        "tgt_audio": None,      "tgt_text": tgt_text,
-        "ctx_pad_mask": ctx_mask_ds, "tgt_pad_mask": tgt_text == PAD,
+        "ctx_audio":    ctx_audio,
+        "ctx_text":     None,
+        "tgt_audio":    None,
+        "tgt_text":     tgt_text,
+        "ctx_pad_mask": ctx_mask_ds,
+        "tgt_pad_mask": tgt_text == PAD,
         "src_lang": torch.tensor([b["src_lang"] for b in batch]),
         "tgt_lang": torch.tensor([b["tgt_lang"] for b in batch]),
         "src_mod":  torch.tensor([b["src_mod"]  for b in batch]),
@@ -324,12 +449,19 @@ def _collate_text_text(batch):
     batch = [b for b in batch if b is not None]
     if not batch:
         return {}
-    ctx = pad_sequence([b["ctx_ids"] for b in batch], batch_first=True, padding_value=PAD)
-    tgt = pad_sequence([b["tgt_ids"] for b in batch], batch_first=True, padding_value=PAD)
+    ctx = pad_sequence(
+        [b["ctx_ids"] for b in batch], batch_first=True, padding_value=PAD
+    )
+    tgt = pad_sequence(
+        [b["tgt_ids"] for b in batch], batch_first=True, padding_value=PAD
+    )
     return {
-        "ctx_audio": None, "ctx_text": ctx,
-        "tgt_audio": None, "tgt_text": tgt,
-        "ctx_pad_mask": ctx == PAD, "tgt_pad_mask": tgt == PAD,
+        "ctx_audio":    None,
+        "ctx_text":     ctx,
+        "tgt_audio":    None,
+        "tgt_text":     tgt,
+        "ctx_pad_mask": ctx == PAD,
+        "tgt_pad_mask": tgt == PAD,
         "src_lang": torch.tensor([b["src_lang"] for b in batch]),
         "tgt_lang": torch.tensor([b["tgt_lang"] for b in batch]),
         "src_mod":  torch.tensor([b["src_mod"]  for b in batch]),
@@ -342,7 +474,9 @@ def _collate_text_audio(batch):
     batch = [b for b in batch if b is not None]
     if not batch:
         return {}
-    ctx_text  = pad_sequence([b["ctx_ids"] for b in batch], batch_first=True, padding_value=PAD)
+    ctx_text  = pad_sequence(
+        [b["ctx_ids"] for b in batch], batch_first=True, padding_value=PAD
+    )
     max_T     = max(b["mel"].shape[1] for b in batch)
     n_mels    = batch[0]["mel"].shape[0]
     tgt_audio = torch.zeros(len(batch), n_mels, max_T)
@@ -354,14 +488,18 @@ def _collate_text_audio(batch):
     # AudioStem has stride-2 conv: output length = ceil(T/2). Downsample mask to match.
     tgt_mask_ds = tgt_mask[:, ::2]
     return {
-        "ctx_audio": None,      "ctx_text": ctx_text,
-        "tgt_audio": tgt_audio, "tgt_text": None,
-        "ctx_pad_mask": ctx_text == PAD, "tgt_pad_mask": tgt_mask_ds,
+        "ctx_audio":    None,
+        "ctx_text":     ctx_text,
+        "tgt_audio":    tgt_audio,
+        "tgt_text":     None,
+        "ctx_pad_mask": ctx_text == PAD,
+        "tgt_pad_mask": tgt_mask_ds,
         "src_lang": torch.tensor([b["src_lang"] for b in batch]),
         "tgt_lang": torch.tensor([b["tgt_lang"] for b in batch]),
         "src_mod":  torch.tensor([b["src_mod"]  for b in batch]),
         "tgt_mod":  torch.tensor([b["tgt_mod"]  for b in batch]),
     }
+
 
 
 if __name__ == "__main__":
@@ -372,9 +510,13 @@ if __name__ == "__main__":
 
     tok = _Tok()
 
+    # --- change these to None / "train.100" for a full run ---
+    MAX = 50          # samples per source
+    BS  = 8           # batch size for the smoke test
+
     def _grab(ds, n=12):
         items = []
-        for i in range(min(len(ds), 200)):
+        for i in range(min(len(ds), 500)):
             x = ds[i]
             if x is not None:
                 items.append(x)
@@ -384,8 +526,8 @@ if __name__ == "__main__":
 
     print("\n── Obj A: Audio -> Text (both languages) ──")
     try:
-        ds = ObjA(tok)
-        b  = _collate_audio_text(_grab(ds))
+        ds = ObjA(tok, max_samples=MAX)
+        b  = _collate_audio_text(_grab(ds, BS))
         print(f"  ctx_audio    : {b['ctx_audio'].shape}")
         print(f"  tgt_text     : {b['tgt_text'].shape}")
         print(f"  src_mod      : {b['src_mod'].tolist()}  (1=audio)")
@@ -397,8 +539,8 @@ if __name__ == "__main__":
 
     print("\n── Obj B: Text -> Text (translation) ──")
     try:
-        ds = ObjB(tok)
-        b  = _collate_text_text(_grab(ds))
+        ds = ObjB(tok, max_samples=MAX * 2)
+        b  = _collate_text_text(_grab(ds, BS))
         print(f"  ctx_text     : {b['ctx_text'].shape}")
         print(f"  tgt_text     : {b['tgt_text'].shape}")
         print(f"  src_mod      : {b['src_mod'].tolist()}  (0=text)")
@@ -409,8 +551,8 @@ if __name__ == "__main__":
 
     print("\n── Obj C: Text -> Audio (both languages) ──")
     try:
-        ds = ObjC(tok)
-        b  = _collate_text_audio(_grab(ds))
+        ds = ObjC(tok, max_samples=MAX)
+        b  = _collate_text_audio(_grab(ds, BS))
         print(f"  ctx_text     : {b['ctx_text'].shape}")
         print(f"  tgt_audio    : {b['tgt_audio'].shape}")
         print(f"  src_mod      : {b['src_mod'].tolist()}  (0=text)")
