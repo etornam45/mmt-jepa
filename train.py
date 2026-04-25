@@ -11,9 +11,9 @@ from model import MMT_JEPA
 EPOCHS     = 10
 LR         = 3e-4
 BATCH_SIZE = 32
-LOG_EVERY  = 500
+LOG_EVERY  = 50
 GRAD_CLIP  = 1.0
-MAX_SAMPLES = 1000
+MAX_SAMPLES = 4000
 
 if __name__ == "__main__":
     device = torch.device(

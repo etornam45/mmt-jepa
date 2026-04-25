@@ -50,6 +50,10 @@ def make_mel(audio, src_sr: int, cfg=None,
     if cfg is not None:
         target_sr = cfg.sample_rate
         n_mels    = cfg.n_mels
+        # AudioStem downsamples by 2, so we allow 2x max_seq_len frames
+        max_frames = cfg.max_seq_len * 2
+    else:
+        max_frames = 3000
 
     if isinstance(audio, Tensor):
         y = audio.numpy()
@@ -62,7 +66,7 @@ def make_mel(audio, src_sr: int, cfg=None,
     if src_sr != target_sr:
         y = librosa.resample(y, orig_sr=src_sr, target_sr=target_sr)
 
-    if len(y) == 0 or len(y) > target_sr * 30:
+    if len(y) == 0 or len(y) > target_sr * 60:  # increased limit, we truncate mel instead
         return None
 
     mel    = librosa.feature.melspectrogram(
@@ -70,6 +74,10 @@ def make_mel(audio, src_sr: int, cfg=None,
     )
     mel_db = librosa.power_to_db(mel, top_db=80)
     mel_t  = torch.from_numpy(mel_db.astype(np.float32))
+    
+    # Strictly truncate to ensure it fits the model's positional encoding cache
+    mel_t  = mel_t[:, :max_frames]
+
     return (mel_t - mel_t.mean()) / (mel_t.std() + 1e-6)
 
 
