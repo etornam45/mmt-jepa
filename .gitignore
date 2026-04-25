@@ -12,7 +12,7 @@ model
 corpus.txt
 
 tokenizer
-checkpoint
+checkpoints
 
 
 # Dotfiles

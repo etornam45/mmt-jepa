@@ -6,8 +6,9 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from config import TinyMMT_JEPAConfig
 from dataset import ObjA, ObjB, ObjC
-from model import MMT_JEPA, ModelConfig
+from model import MMT_JEPA
 from decoder import Decoder, mel_reconstruction_loss
 
 EPOCHS      = 10
@@ -16,8 +17,9 @@ BATCH_SIZE  = 32
 LOG_EVERY   = 200
 GRAD_CLIP   = 1.0
 FREEZE_JEPA = True
-JEPA_CKPT   = "checkpoint/mmt_jepa_10.pt"
-OUT_DIR     = "checkpoint"
+JEPA_CKPT   = "checkpoints/epoch003.pt"
+OUT_DIR     = "checkpoints"
+MAX_SAMPLES = 4000
 
 # Toggle objectives — any non-empty subset of {"A", "B", "C"}
 #   "A" : audio  -> text   (transcription)
@@ -85,10 +87,10 @@ def forward_obj(
     raise ValueError(f"Unknown objective: {obj!r}")
 
 
-def maybe_load_jepa_checkpoint(model: Decoder, ckpt_path: str | None, device) -> None:
+def maybe_load_jepa_checkpoint(model: MMT_JEPA, ckpt_path: str | None) -> None:
     if not ckpt_path:
         return
-    state = torch.load(ckpt_path, map_location=device)
+    state = torch.load(ckpt_path, map_location="cpu")
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
     missing, unexpected = model.load_state_dict(state, strict=False)
@@ -110,12 +112,12 @@ if __name__ == "__main__":
     sp = spm.SentencePieceProcessor()
     sp.Load("tokenizer/tokenizer.model")
 
-    cfg = ModelConfig()
+    cfg = TinyMMT_JEPAConfig()
 
     _dataset_cls = {"A": ObjA, "B": ObjB, "C": ObjC}
     active_objs  = [o for o in _OBJ_ORDER if o in ACTIVE]   # stable order
     loaders      = {
-        o: _dataset_cls[o](sp, cfg).loader(batch_size=BATCH_SIZE, num_workers=2)
+        o: _dataset_cls[o](sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
         for o in active_objs
     }
 
@@ -124,7 +126,7 @@ if __name__ == "__main__":
     print(f"Steps/epoch: {steps_per_epoch:,}  total: {total_steps:,}")
 
     base  = MMT_JEPA(cfg)
-    maybe_load_jepa_checkpoint(base, JEPA_CKPT, device)
+    maybe_load_jepa_checkpoint(base, JEPA_CKPT)
     model = Decoder(cfg, base, freeze_jepa=FREEZE_JEPA).to(device)
     del base
 
@@ -186,6 +188,6 @@ if __name__ == "__main__":
         avg = running / max(1, steps_per_epoch)
         print(f"epoch {epoch + 1}/{EPOCHS}  avg_loss {avg:.4f}  {time.time() - t0:.0f}s")
 
-        ckpt_path = os.path.join(OUT_DIR, f"decoder_epoch{epoch + 1:03d}.pt")
+        ckpt_path = os.path.join(OUT_DIR, f"jepa_ep003_decoder_epoch{epoch + 1:03d}.pt")
         torch.save(model.state_dict(), ckpt_path)
         print(f"Saved: {ckpt_path}")
