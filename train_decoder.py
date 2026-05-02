@@ -233,7 +233,10 @@ if __name__ == "__main__":
         run_log.log_epoch(epoch + 1, avg, time.time() - t0)
 
         ckpt_path = os.path.join(OUT_DIR, f"jepa_ep003_decoder_epoch{epoch + 1:03d}.pt")
-        torch.save(decoder_checkpoint_state_dict(model), ckpt_path)
+        torch.save(
+            decoder_checkpoint_state_dict(model) if FREEZE_JEPA else model.state_dict(),
+            ckpt_path,
+        )
         print(f"Saved: {ckpt_path}")
 
     run_log.close()
