@@ -1,33 +1,10 @@
 from torch import Tensor, nn
 import torch
 import torch.nn.functional as F
-from dataclasses import dataclass
 import math
-
+from config import ModelConfig
 from sigreg import SIGReg
 
-
-@dataclass
-class ModelConfig:
-    d_model:      int   = 512
-    n_heads:      int   = 8
-    trunk_layers: int   = 6
-    
-    pred_layers:  int   = 6      # narrow predictor
-    pred_dim:     int   = 512    # d_model // 2
-
-    dec_layers:   int   = 4
-    dec_dim:      int   = 512
-
-    vocab_size:   int   = 16_000
-    n_mels:       int   = 80
-    n_langs:      int   = 2      # eng, twi
-    n_mods:       int   = 2      # text, audio
-    dropout:       float = 0.15
-    sigreg_lambda: float = 0.02  # weight on SIGReg; pred weight is (1 - λ)
-    sigreg_knots:  int   = 17
-    max_seq_len:  int   = 1500   # upper bound for PE cache
-    sample_rate:  int   = 16_000 # audio sample rate
 
 
 class SinusoidalPE(nn.Module):

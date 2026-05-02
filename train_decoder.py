@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from config import TinyMMT_JEPAConfig
+from config import ModelConfig
 from dataset import ObjA, ObjB, ObjC
 from decoder import Decoder, mel_reconstruction_loss
 from logger import TrainingLogger
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     sp = spm.SentencePieceProcessor()
     sp.Load("tokenizer/tokenizer.model")
 
-    cfg = TinyMMT_JEPAConfig()
+    cfg = ModelConfig()
 
     _dataset_cls = {"A": ObjA, "B": ObjB, "C": ObjC}
     active_objs  = [o for o in _OBJ_ORDER if o in ACTIVE]   # stable order

@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from config import TinyMMT_JEPAConfig
+from config import ModelConfig
 from dataset import ObjA, ObjB, ObjC
 from logger import TrainingLogger
 from model import MMT_JEPA
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     sp = spm.SentencePieceProcessor()
     sp.Load("tokenizer/tokenizer.model")
 
-    cfg = TinyMMT_JEPAConfig()
+    cfg = ModelConfig()
 
     loader_a = ObjA(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
     loader_b = ObjB(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)

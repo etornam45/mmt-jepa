@@ -1,19 +1,19 @@
 import torch
 from decoder import Decoder, build_io_ids
 from model import MMT_JEPA
-from config import TinyMMT_JEPAConfig
+from config import ModelConfig
 import sentencepiece as spm
 
 
 # Checkpoints
-mmt_jepa_ckpt = "checkpoints/epoch003.pt"
-decoder_ckpt = "checkpoints/jepa_ep003_decoder_epoch020.pt"
+mmt_jepa_ckpt = "checkpoints/epoch010.pt"
+decoder_ckpt = "checkpoints/jepa_ep003_decoder_epoch010.pt"
 tokenizer_path = "tokenizer/tokenizer.model"
 
 sp = spm.SentencePieceProcessor()
 sp.Load(tokenizer_path)
 
-cfg = TinyMMT_JEPAConfig()
+cfg = ModelConfig()
 jepa = MMT_JEPA(cfg)
 jepa.load_state_dict(torch.load(mmt_jepa_ckpt))
 
