@@ -3,27 +3,8 @@ import torch
 import torch.nn.functional as F
 from dataclasses import dataclass
 import math
-import copy
 
-
-def jepa_loss(z_hat: Tensor, z_tgt: Tensor, temp: float = 0.1, lam: float = 0.5) -> Tensor:
-    """
-    Combined MSE + InfoNCE loss as used in VL-JEPA.
-    Both inputs must already be L2-normalised.
-
-    lam : weight on InfoNCE (0 = pure MSE, 1 = pure InfoNCE)
-    temp: InfoNCE temperature — lower = sharper, more collapse-resistant
-    """
-    # alignment (MSE on unit vectors = 2 - 2*cos, bounded [0,4])
-    mse = F.mse_loss(z_hat, z_tgt)
-
-    # uniformity via InfoNCE
-    # logits: (B, B) — diagonal entries are positives
-    logits = torch.matmul(z_hat, z_tgt.T) / temp   # (B, B)
-    labels = torch.arange(logits.size(0), device=logits.device)
-    nce = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
-
-    return (1 - lam) * mse + lam * nce
+from sigreg import SIGReg
 
 
 @dataclass
@@ -42,8 +23,9 @@ class ModelConfig:
     n_mels:       int   = 80
     n_langs:      int   = 2      # eng, twi
     n_mods:       int   = 2      # text, audio
-    dropout:      float = 0.15
-    ema_decay:    float = 0.996
+    dropout:       float = 0.15
+    sigreg_lambda: float = 0.02  # weight on SIGReg; pred weight is (1 - λ)
+    sigreg_knots:  int   = 17
     max_seq_len:  int   = 1500   # upper bound for PE cache
     sample_rate:  int   = 16_000 # audio sample rate
 
@@ -81,19 +63,22 @@ class SinusoidalPE(nn.Module):
 
 
 class AudioStem(nn.Module):
+    """Mel front-end: two convs + avg-pool (~×2 downsample). Avoids strided-conv MPS backward bugs."""
+
     def __init__(self, n_mels: int, d_model: int) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(n_mels, d_model, 3, padding=1),            # (B, d, T)
-            nn.SiLU(),
-            nn.Conv1d(d_model, d_model, 3, stride=2, padding=1), # (B, d, T//2)
-        )
-        self.norm = nn.LayerNorm(d_model)
+        self.conv1 = nn.Conv1d(n_mels, d_model, 3, padding=1)
+        self.act   = nn.SiLU()
+        self.conv2 = nn.Conv1d(d_model, d_model, 3, stride=1, padding=1)
+        self.down  = nn.AvgPool1d(kernel_size=2, stride=2)
+        self.norm  = nn.LayerNorm(d_model)
 
     def forward(self, x: Tensor) -> Tensor:
         # x: (B, n_mels, T)
-        out = self.net(x)                        # (B, d_model, T//2)
-        return self.norm(out.transpose(1, 2))    # (B, T//2, d_model)
+        x = self.act(self.conv1(x.contiguous())).contiguous()
+        x = self.conv2(x).contiguous()
+        x = self.down(x)
+        return self.norm(x.transpose(1, 2).contiguous())
 
 
 class TextStem(nn.Module):
@@ -130,15 +115,11 @@ class Shunt(nn.Module):
     def forward(self, x: Tensor, key_padding_mask: Tensor | None = None) -> Tensor:
         # x:    (B, T, d_model)
         # mask: (B, T) bool — True where padded
-        return self.encoder(x, src_key_padding_mask=key_padding_mask)
+        return self.encoder(x, src_key_padding_mask=key_padding_mask).contiguous()
 
 
 class Predictor(nn.Module):
-    """
-    Narrow JEPA predictor.  Receives the context encoding z_ctx and four
-    conditioning tokens (src_lang, src_mod, tgt_lang, tgt_mod), and
-    predicts the target encoding z_tgt in the shared latent space.
-    """
+    """Context sequence + lang/mod tokens → predicted target sequence in latent space."""
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
@@ -182,23 +163,11 @@ class Predictor(nn.Module):
 
         x = torch.cat([cond, self.proj_in(z_ctx)], dim=1)     # (B, T+1, pd)
         x = self.encoder(x)
-        return self.proj_out(x[:, 1:, :])                      # (B, T, d_model)
+        return self.proj_out(x[:, 1:, :]).contiguous()         # (B, T, d_model)
 
 
 class MMT_JEPA(nn.Module):
-    """
-    Full model: stems → PE → shared trunk → predictor.
-
-    The EMA target encoder is an internal shadow copy of the online encoder
-    (audio_stem + text_stem + pe + trunk).  Its weights are never touched by
-    the optimiser — only by ema_step().  It produces the stop-gradient target
-    z_tgt used in the JEPA L2 loss.
-
-    EMA schedule — decay is annealed with a cosine ramp from ema_decay_base
-    up to ema_decay over total_steps.  This gives the target encoder more
-    freedom to move early in training (when the online encoder is still far
-    from useful representations) and locks it in tightly later.
-    """
+    """LeJEPA-style multimodal JEPA: shared encoder, predictor, MSE on pools + SIGReg on ctx/tgt pools."""
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
@@ -210,98 +179,20 @@ class MMT_JEPA(nn.Module):
         self.trunk      = Shunt(cfg)
         self.predictor  = Predictor(cfg)
 
-        self.target_audio_stem = copy.deepcopy(self.audio_stem)
-        self.target_text_stem  = copy.deepcopy(self.text_stem)
-        self.target_pe         = copy.deepcopy(self.pe)
-        self.target_trunk      = copy.deepcopy(self.trunk)
-        self._set_target_grad(False)
-
-        self.register_buffer("ema_step_count", torch.tensor(0, dtype=torch.long))
-
-    def _set_target_grad(self, requires: bool) -> None:
-        for p in self._target_params():
-            p.requires_grad_(requires)
-
-    def _target_params(self):
-        """Yield all parameters that belong to the target encoder."""
-        for module in (
-            self.target_audio_stem,
-            self.target_text_stem,
-            self.target_pe,
-            self.target_trunk,
-        ):
-            yield from module.parameters()
-
-    def _online_params(self):
-        """Yield online encoder parameters in the same order as _target_params."""
-        for module in (self.audio_stem, self.text_stem, self.pe, self.trunk):
-            yield from module.parameters()
-
-    def _cosine_decay(self, total_steps: int) -> float:
-        """
-        Cosine-annealed EMA decay.
-        Starts at ema_decay_base (≈0.99) and rises to cfg.ema_decay (0.996).
-        Keeps the target responsive early, then stabilises it.
-        """
-        base  = max(0.0, self.cfg.ema_decay - 0.006)   # e.g. 0.990
-        peak  = self.cfg.ema_decay                      # 0.996
-        step  = min(int(self.ema_step_count), total_steps)
-        cos_v = math.cos(math.pi * step / total_steps)  # 1 → -1
-        return peak - (peak - base) * (cos_v + 1) / 2  # base → peak
-
-    @torch.no_grad()
-    def ema_step(self, total_steps: int = 100_000) -> float:
-        """
-        Update target encoder weights with exponential moving average.
-
-        Call once per training step, after loss.backward() and optimiser.step().
-        Returns the decay value used (useful for logging).
-
-        Args:
-            total_steps: total expected training steps across the current phase,
-                         used for cosine decay scheduling.
-        """
-        decay = self._cosine_decay(total_steps)
-        for p_tgt, p_online in zip(self._target_params(), self._online_params()):
-            p_tgt.data.mul_(decay).add_(p_online.data, alpha=1.0 - decay)
-        self.ema_step_count.add_(1)
-        return decay
-
     def encode(
         self,
         text_ids:  Tensor | None = None,  # (B, L)
         audio_mel: Tensor | None = None,  # (B, n_mels, T)
         pad_mask:  Tensor | None = None,  # (B, S) bool — True where padded
     ) -> Tensor:
-        """Online encoder: stem → sinusoidal PE → shared trunk."""
+        """Encoder: stem → sinusoidal PE → shared trunk (text XOR audio)."""
         assert (text_ids is None) != (audio_mel is None), \
             "Provide exactly one of text_ids or audio_mel."
+        if audio_mel is not None:
+            audio_mel = audio_mel.contiguous()
         x = self.text_stem(text_ids) if text_ids is not None else self.audio_stem(audio_mel)
         x = self.pe(x)
         return self.trunk(x, key_padding_mask=pad_mask)
-
-    @torch.no_grad()
-    def encode_target(
-        self,
-        text_ids:  Tensor | None = None,
-        audio_mel: Tensor | None = None,
-        pad_mask:  Tensor | None = None,
-    ) -> Tensor:
-        """
-        Target encoder: identical path through the EMA shadow copies.
-
-        Always runs under no_grad — the stop-gradient on z_tgt is structural,
-        not a .detach() call that can be accidentally removed.
-        """
-        assert (text_ids is None) != (audio_mel is None), \
-            "Provide exactly one of text_ids or audio_mel."
-        x = (
-            self.target_text_stem(text_ids)
-            if text_ids is not None
-            else self.target_audio_stem(audio_mel)
-        )
-        x = self.target_pe(x)
-        return self.target_trunk(x, key_padding_mask=pad_mask)
 
     @staticmethod
     def _pool(z: Tensor, pad_mask: Tensor | None) -> Tensor:
@@ -314,8 +205,9 @@ class MMT_JEPA(nn.Module):
         if pad_mask is not None:
             # pad_mask: (B, T) bool, True where padded
             keep = (~pad_mask).unsqueeze(-1).float()   # (B, T, 1)
-            return (z * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1)
-        return z.mean(dim=1)
+            out = (z * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1)
+            return out.contiguous()
+        return z.mean(dim=1).contiguous()
 
     def forward(
         self,
@@ -329,34 +221,23 @@ class MMT_JEPA(nn.Module):
         tgt_mod:      Tensor,
         ctx_pad_mask: Tensor | None = None,
         tgt_pad_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor]:
-        """
-        Single forward pass for one JEPA objective.
-
-        Cross-modal objectives (text→audio, audio→text) produce sequences of
-        different lengths, so both sides are mean-pooled to a single vector
-        before the loss.  Same-modality objectives pool identically — no
-        special casing needed in the training loop.
-
-        Returns:
-            z_hat : (B, d_model)  predicted target representation  [requires grad]
-            z_tgt : (B, d_model)  EMA target representation        [no grad]
-
-        Loss in the training loop:
-            loss = F.mse_loss(z_hat, z_tgt)
-        """
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Returns normalised (z_hat, z_tgt) and raw ``sigreg_proj`` (2, B, d) for SIGReg."""
         z_ctx = self.encode(ctx_text, ctx_audio, ctx_pad_mask)
+        z_ctx_raw = self._pool(z_ctx, ctx_pad_mask)
+
         z_seq = self.predictor(z_ctx, src_lang, src_mod, tgt_lang, tgt_mod)
         z_hat = self._pool(z_seq, ctx_pad_mask)
 
-        z_full = self.encode_target(tgt_text, tgt_audio, tgt_pad_mask)
-        z_tgt  = self._pool(z_full, tgt_pad_mask)
+        z_full = self.encode(tgt_text, tgt_audio, tgt_pad_mask)
+        z_tgt_raw = self._pool(z_full, tgt_pad_mask)
 
-        # L2-normalise before loss — keeps MSE scale-invariant across modalities
-        z_hat = F.normalize(z_hat, dim=-1)
-        z_tgt = F.normalize(z_tgt, dim=-1)
+        sigreg_proj = torch.stack([z_ctx_raw, z_tgt_raw], dim=0)
 
-        return z_hat, z_tgt
+        z_hat = F.normalize(z_hat, dim=-1).contiguous()
+        z_tgt = F.normalize(z_tgt_raw, dim=-1).contiguous()
+
+        return z_hat, z_tgt, sigreg_proj
 
 
 if __name__ == "__main__":
@@ -364,13 +245,9 @@ if __name__ == "__main__":
     model = MMT_JEPA(cfg)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    frozen    = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     print(model)
     print(f"\nTrainable parameters : {trainable:,}")
-    print(f"Frozen (EMA target)  : {frozen:,}")
-    print(f"Total parameters : {(trainable + frozen):,}")
 
-    
     B, L, T = 32, 16, 128
     dummy_text  = torch.randint(0, cfg.vocab_size, (B, L))
     dummy_audio = torch.randn(B, cfg.n_mels, T)
@@ -379,18 +256,19 @@ if __name__ == "__main__":
     src_mod  = torch.zeros(B, dtype=torch.long)   # text = 0
     tgt_mod  = torch.ones(B,  dtype=torch.long)   # audio = 1
 
-    z_hat, z_tgt = model(
+    z_hat, z_tgt, sigreg_proj = model(
         ctx_text=dummy_text, ctx_audio=None,
         tgt_text=None,       tgt_audio=dummy_audio,
         src_lang=src_lang,   src_mod=src_mod,
         tgt_lang=tgt_lang,   tgt_mod=tgt_mod,
     )
-    loss  = F.mse_loss(z_hat, z_tgt)
+    lam = cfg.sigreg_lambda
+    pred = F.mse_loss(z_hat, z_tgt)
+    sig = SIGReg(knots=cfg.sigreg_knots)
+    reg = sig(sigreg_proj)
+    loss = (1.0 - lam) * pred + lam * reg
     loss.backward()
 
-    decay = model.ema_step(total_steps=50_000)
-    print(f"\nSmoke-test loss      : {loss.item():.4f}")
-    print(f"EMA decay used       : {decay:.6f}")
-    print(f"EMA step count       : {int(model.ema_step_count)}")
-    print(f"z_hat shape          : {z_hat.shape}  (B, d_model — mean-pooled)")
-    print(f"z_tgt shape          : {z_tgt.shape}  (B, d_model — mean-pooled)")
+    print(f"\nSmoke-test pred/reg/total : {pred.item():.4f} / {reg.item():.4f} / {loss.item():.4f}")
+    print(f"z_hat shape          : {z_hat.shape}")
+    print(f"sigreg_proj shape    : {sigreg_proj.shape}")

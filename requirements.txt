@@ -1,0 +1,6 @@
+torch
+torchaudio
+soundfile
+sentencepiece
+datasets
+matplotlib

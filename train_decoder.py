@@ -1,6 +1,7 @@
 import math
 import os
 import time
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -8,8 +9,9 @@ from tqdm import tqdm
 
 from config import TinyMMT_JEPAConfig
 from dataset import ObjA, ObjB, ObjC
-from model import MMT_JEPA
 from decoder import Decoder, mel_reconstruction_loss
+from logger import TrainingLogger
+from model import MMT_JEPA
 
 EPOCHS      = 10
 LR          = 3e-4
@@ -17,7 +19,7 @@ BATCH_SIZE  = 32
 LOG_EVERY   = 200
 GRAD_CLIP   = 1.0
 FREEZE_JEPA = True
-JEPA_CKPT   = "checkpoints/epoch003.pt"
+JEPA_CKPT   = "checkpoints/epoch010.pt"
 OUT_DIR     = "checkpoints"
 MAX_SAMPLES = 4000
 
@@ -59,35 +61,56 @@ def forward_obj(
     obj: str,
     b: dict,
     model: Decoder,
+    *,
+    freeze_jepa: bool,
 ) -> torch.Tensor:
-    """Run one objective and return its loss."""
+    """Run one objective and return its loss.
+
+    When ``freeze_jepa`` is True, encoder + predictor (and frozen ``text_stem`` for
+    teacher-forcing inputs) run under ``torch.no_grad()`` so activations are not
+    saved for backprop through unused frozen weights.
+    """
+    enc_cm = torch.no_grad() if freeze_jepa else nullcontext()
+
     if obj == "A":
         # ObjA: audio -> text  (teacher-forced CE)
-        z_ctx  = model.encode(audio_mel=b["ctx_audio"], pad_mask=b["ctx_pad_mask"])
-        z_hat  = model.predict(z_ctx, b["src_lang"], b["src_mod"], b["tgt_lang"], b["tgt_mod"])
-        tgt_in = model.text_stem(b["tgt_text"][:, :-1])            # shifted-right input
+        with enc_cm:
+            z_ctx = model.encode(audio_mel=b["ctx_audio"], pad_mask=b["ctx_pad_mask"])
+            z_hat = model.predict(z_ctx, b["src_lang"], b["src_mod"], b["tgt_lang"], b["tgt_mod"])
+            tgt_in = model.text_stem(b["tgt_text"][:, :-1])
         logits = model.text_decoder(tgt_in, z_hat, b["tgt_mod"], b["tgt_lang"])
         return text_ce_loss(logits, b["tgt_text"])
 
     if obj == "B":
         # ObjB: text -> text  (teacher-forced CE)
-        z_ctx  = model.encode(text_ids=b["ctx_text"], pad_mask=b["ctx_pad_mask"])
-        z_hat  = model.predict(z_ctx, b["src_lang"], b["src_mod"], b["tgt_lang"], b["tgt_mod"])
-        tgt_in = model.text_stem(b["tgt_text"][:, :-1])            # shifted-right input
+        with enc_cm:
+            z_ctx = model.encode(text_ids=b["ctx_text"], pad_mask=b["ctx_pad_mask"])
+            z_hat = model.predict(z_ctx, b["src_lang"], b["src_mod"], b["tgt_lang"], b["tgt_mod"])
+            tgt_in = model.text_stem(b["tgt_text"][:, :-1])
         logits = model.text_decoder(tgt_in, z_hat, b["tgt_mod"], b["tgt_lang"])
         return text_ce_loss(logits, b["tgt_text"])
 
     if obj == "C":
         # ObjC: text -> audio
-        z_ctx = model.encode(text_ids=b["ctx_text"], pad_mask=b["ctx_pad_mask"])
-        z_hat = model.predict(z_ctx, b["src_lang"], b["src_mod"], b["tgt_lang"], b["tgt_mod"])
-        pred  = model.audio_decoder(z_hat, b["tgt_lang"], target_len=b["tgt_audio"].size(-1))
+        with enc_cm:
+            z_ctx = model.encode(text_ids=b["ctx_text"], pad_mask=b["ctx_pad_mask"])
+            z_hat = model.predict(z_ctx, b["src_lang"], b["src_mod"], b["tgt_lang"], b["tgt_mod"])
+        pred = model.audio_decoder(z_hat, b["tgt_lang"], target_len=b["tgt_audio"].size(-1))
         return mel_reconstruction_loss(pred, b["tgt_audio"])
 
     raise ValueError(f"Unknown objective: {obj!r}")
 
 
+def decoder_checkpoint_state_dict(model: Decoder) -> dict[str, torch.Tensor]:
+    """Trainable heads only — avoids a full copy of frozen JEPA weights each save."""
+    out: dict[str, torch.Tensor] = {}
+    out.update({f"text_decoder.{k}": v for k, v in model.text_decoder.state_dict().items()})
+    out.update({f"audio_decoder.{k}": v for k, v in model.audio_decoder.state_dict().items()})
+    return out
+
+
 def maybe_load_jepa_checkpoint(model: MMT_JEPA, ckpt_path: str | None) -> None:
+    """Load weights with ``strict=False`` (LeJEPA ckpts omit ``target_*``; legacy EMA ckpts drop targets)."""
     if not ckpt_path:
         return
     state = torch.load(ckpt_path, map_location="cpu")
@@ -107,6 +130,8 @@ if __name__ == "__main__":
     )
     print("Device:", device)
     print(f"Active objectives : {sorted(ACTIVE)}")
+    run_log = TrainingLogger.create(name="decoder")
+    print(f"Metrics dir: {run_log.run_path}")
 
     import sentencepiece as spm
     sp = spm.SentencePieceProcessor()
@@ -127,8 +152,13 @@ if __name__ == "__main__":
 
     base  = MMT_JEPA(cfg)
     maybe_load_jepa_checkpoint(base, JEPA_CKPT)
+    print(f"Jepa Parameters: {sum(p.numel() for p in base.parameters())}")
     model = Decoder(cfg, base, freeze_jepa=FREEZE_JEPA).to(device)
+    print(f"Decoder Parameters: {sum(p.numel() for p in model.parameters())}")
     del base
+    # Load checkpont
+    # model.load_state_dict(torch.load("checkpoints/jepa_ep003_decoder_epoch010.pt"))
+    last_epoch = 0
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total     = sum(p.numel() for p in model.parameters())
@@ -148,7 +178,7 @@ if __name__ == "__main__":
     step = 0
     model.train()
 
-    for epoch in range(EPOCHS):
+    for epoch in range(last_epoch, last_epoch + EPOCHS):
         t0      = time.time()
         running = 0.0
         iters   = {o: iter(loader) for o, loader in loaders.items()}
@@ -159,7 +189,11 @@ if __name__ == "__main__":
             try:
                 batch = next(iters[obj])
             except StopIteration:
-                continue
+                iters[obj] = iter(loaders[obj])
+                try:
+                    batch = next(iters[obj])
+                except StopIteration:
+                    continue
             if not batch:
                 continue
 
@@ -167,7 +201,7 @@ if __name__ == "__main__":
                  for k, v in batch.items()}
 
             opt.zero_grad(set_to_none=True)
-            loss = forward_obj(obj, b, model)
+            loss = forward_obj(obj, b, model, freeze_jepa=FREEZE_JEPA)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad], GRAD_CLIP
@@ -184,10 +218,22 @@ if __name__ == "__main__":
                     f"loss {loss.item():.4f}  "
                     f"lr {sched.get_last_lr()[0]:.2e}"
                 )
+                run_log.log_step(
+                    {
+                        "step": step,
+                        "epoch": epoch + 1,
+                        "obj": obj,
+                        "loss": loss.item(),
+                        "lr": sched.get_last_lr()[0],
+                    }
+                )
 
         avg = running / max(1, steps_per_epoch)
         print(f"epoch {epoch + 1}/{EPOCHS}  avg_loss {avg:.4f}  {time.time() - t0:.0f}s")
+        run_log.log_epoch(epoch + 1, avg, time.time() - t0)
 
         ckpt_path = os.path.join(OUT_DIR, f"jepa_ep003_decoder_epoch{epoch + 1:03d}.pt")
-        torch.save(model.state_dict(), ckpt_path)
+        torch.save(decoder_checkpoint_state_dict(model), ckpt_path)
         print(f"Saved: {ckpt_path}")
+
+    run_log.close()
