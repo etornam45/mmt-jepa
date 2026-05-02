@@ -201,9 +201,14 @@ class Decoder(nn.Module):
         if tgt_mod_id == 0:
             if tgt_text_ids is None:
                 raise ValueError("tgt_text_ids is required when decoding target text.")
-            # Shift right for teacher forcing: feed ids[:-1], predict ids[1:]
-            tgt_in = self.text_stem(tgt_text_ids[:, :-1])          # (B, L-1, d_model)
-            return self.text_decoder(tgt_in, z_hat, tgt_mod, tgt_lang)  # (B, L-1, vocab_size)
+            # Shift right for teacher forcing during training: feed ids[:-1], predict ids[1:]
+            # In inference (eval mode), feed the full sequence to get the next token prediction
+            if self.training:
+                tgt_in = self.text_stem(tgt_text_ids[:, :-1])          # (B, L-1, d_model)
+            else:
+                tgt_in = self.text_stem(tgt_text_ids)                  # (B, L, d_model)
+
+            return self.text_decoder(tgt_in, z_hat, tgt_mod, tgt_lang)  # (B, L, vocab_size)
 
         if tgt_mod_id == 1:
             target_len = audio_mel.size(-1) if audio_mel is not None else None

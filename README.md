@@ -1,6 +1,6 @@
 # MMT-JEPA
 
-A multimodal machine translation model for English ↔ Twi using a JEPA (Joint Embedding Predictive Architecture) objective.
+A multimodal English ↔ Twi model trained with a LeJEPA-style objective (predictive MSE + SIGReg on encoder pools).
 
 ## What it does
 
@@ -15,16 +15,17 @@ Three training objectives:
 
 | File | Purpose |
 |---|---|
-| `model.py` | `MMT_JEPA` model + EMA target encoder |
+| `model.py` | `MMT_JEPA` (shared encoder + predictor) |
+| `sigreg.py` | SIGReg loss (LeJEPA) |
 | `dataset.py` | `ObjA`, `ObjB`, `ObjC` dataset classes |
 | `tokenizer.py` | Trains a joint BPE tokenizer on all text data |
-| `train.py` | Training loop (all objectives) |
-| `train_b.py` | Training loop (Objective B only) |
+| `train.py` | SSL pretraining (all objectives) |
+| `train_decoder.py` | Decoder fine-tuning on frozen or tunable JEPA |
 
 ## Setup
 
 ```bash
-pip install torch librosa soundfile sentencepiece datasets
+pip install torch torchaudio soundfile sentencepiece datasets
 ```
 
 ## Usage
@@ -57,16 +58,16 @@ All datasets load automatically via HuggingFace on first run.
 Edit `ModelConfig` in `model.py` to change capacity:
 
 ```python
-d_model      = 512    # embedding dimension
-trunk_layers = 6      # shared transformer depth
-vocab_size   = 16_000
-n_mels       = 80
-sample_rate  = 16_000
+d_model        = 512    # embedding dimension
+trunk_layers   = 6      # shared transformer depth
+vocab_size     = 16_000
+n_mels         = 80
+sample_rate    = 16_000
+sigreg_lambda  = 0.02 # LeJEPA trade-off (TinyMMT_JEPAConfig in config.py for training runs)
 ```
 
 ## Training notes
 
-- First 5 epochs run text-only (ObjB) to warm up representations before audio is introduced
-- L2 normalization applied to both sides before MSE loss to keep scale stable across modalities
-- EMA target encoder uses cosine-annealed decay (0.990 → 0.996)
-- Collapse logged as `COLLAPSE` when `std < 0.01` or `cos_sim > 0.99`
+- L2-normalise pooled predictions and targets before MSE; SIGReg runs on raw pooled ctx/tgt stacks
+- Loss: `(1 - λ) · MSE + λ · SIGReg` with `λ = sigreg_lambda`
+- Possible `COLLAPSE` log when embedding `std` is tiny or cosine similarity is near 1

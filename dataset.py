@@ -27,17 +27,51 @@ Quick start (proof-of-concept, small):
 from __future__ import annotations
 import io
 import random
+from functools import lru_cache
+
 import numpy as np
 import soundfile as sf
 import torch
-import librosa
+import torchaudio
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
+
+def _loader_persistent_kw(num_workers: int) -> dict:
+    if num_workers > 0:
+        return {"persistent_workers": True}
+    return {}
+
 ENG, TWI    = 0, 1
 TEXT, AUDIO = 0, 1
 PAD = 0
+
+
+def _mel_width_to_stem_steps(T: int) -> int:
+    """
+    Time bins in mel (n_mels, T) → sequence length after AudioStem (conv×2 + AvgPool1d 2).
+    Must stay in sync with ``AudioStem`` in model.py (not the old [::2] shortcut).
+    """
+    if T <= 0:
+        return 0
+    # Two Conv1d stride=1 pad=1 preserve length; AvgPool1d(2,2), pad=0
+    return (T - 2) // 2 + 1
+
+
+@lru_cache(maxsize=16)
+def _mel_transforms(target_sr: int, n_mels: int):
+    """Cached mel + dB transforms (same params as former librosa pipeline)."""
+    return (
+        torchaudio.transforms.MelSpectrogram(
+            sample_rate=target_sr,
+            n_fft=400,
+            hop_length=160,
+            n_mels=n_mels,
+            power=2.0,
+        ),
+        torchaudio.transforms.AmplitudeToDB(stype="power", top_db=80.0),
+    )
 
 
 def make_mel(audio, src_sr: int, cfg=None,
@@ -46,6 +80,9 @@ def make_mel(audio, src_sr: int, cfg=None,
     audio: numpy array or torch Tensor, any shape — mono or stereo.
     Returns (n_mels, T) float32 tensor, z-score normalised. None if too long/short.
     Accepts an optional ModelConfig; if provided, uses cfg.sample_rate and cfg.n_mels.
+
+    Uses torchaudio (not librosa) so DataLoader workers do not import numba, which
+    breaks under NumPy 2.3+ with older numba builds.
     """
     if cfg is not None:
         target_sr = cfg.sample_rate
@@ -56,27 +93,23 @@ def make_mel(audio, src_sr: int, cfg=None,
         max_frames = 3000
 
     if isinstance(audio, Tensor):
-        y = audio.numpy()
+        y = audio.detach().cpu().float()
     else:
-        y = np.asarray(audio, dtype=np.float32)
+        y = torch.from_numpy(np.asarray(audio, dtype=np.float32))
 
     if y.ndim > 1:
-        y = y.mean(axis=0)
+        y = y.mean(dim=0)
 
-    if src_sr != target_sr:
-        y = librosa.resample(y, orig_sr=src_sr, target_sr=target_sr)
-
-    if len(y) == 0 or len(y) > target_sr * 60:  # increased limit, we truncate mel instead
+    n = y.numel()
+    if n == 0 or n > target_sr * 60:
         return None
 
-    mel    = librosa.feature.melspectrogram(
-        y=y, sr=target_sr, n_fft=400, hop_length=160, n_mels=n_mels, power=2.0
-    )
-    mel_db = librosa.power_to_db(mel, top_db=80)
-    mel_t  = torch.from_numpy(mel_db.astype(np.float32))
-    
-    # Strictly truncate to ensure it fits the model's positional encoding cache
-    mel_t  = mel_t[:, :max_frames]
+    if src_sr != target_sr:
+        y = torchaudio.functional.resample(y.unsqueeze(0), src_sr, target_sr).squeeze(0)
+
+    mel_spec, to_db = _mel_transforms(target_sr, n_mels)
+    mel_db = to_db(mel_spec(y).float())
+    mel_t = mel_db[:, :max_frames]
 
     return (mel_t - mel_t.mean()) / (mel_t.std() + 1e-6)
 
@@ -220,7 +253,7 @@ class ObjA(Dataset):
     ----------
     ctx_audio    (B, 80, T)  |  ctx_text     None
     tgt_text     (B, L)      |  tgt_audio    None
-    ctx_pad_mask (B, T//2)   |  tgt_pad_mask (B, L)
+    ctx_pad_mask (B, stem_T) |  tgt_pad_mask (B, L)   # stem_T = f(mel width), see _mel_width_to_stem_steps
     src_lang / tgt_lang / src_mod (=AUDIO) / tgt_mod (=TEXT)
 
     Parameters
@@ -267,6 +300,7 @@ class ObjA(Dataset):
             num_workers=num_workers,
             collate_fn=_collate_audio_text,
             drop_last=True,
+            **_loader_persistent_kw(num_workers),
         )
 
 
@@ -356,6 +390,7 @@ class ObjB(Dataset):
             num_workers=num_workers,
             collate_fn=_collate_text_text,
             drop_last=True,
+            **_loader_persistent_kw(num_workers),
         )
 
 
@@ -369,7 +404,7 @@ class ObjC(Dataset):
     ----------
     ctx_audio    None        |  ctx_text     (B, L)
     tgt_audio    (B, 80, T)  |  tgt_text     None
-    ctx_pad_mask (B, L)      |  tgt_pad_mask (B, T//2)
+    ctx_pad_mask (B, L)      |  tgt_pad_mask (B, stem_T)
     src_lang / tgt_lang / src_mod (=TEXT) / tgt_mod (=AUDIO)
 
     Parameters
@@ -416,6 +451,7 @@ class ObjC(Dataset):
             num_workers=num_workers,
             collate_fn=_collate_text_audio,
             drop_last=True,
+            **_loader_persistent_kw(num_workers),
         )
 
 
@@ -428,16 +464,17 @@ def _collate_audio_text(batch):
     max_T  = max(b["mel"].shape[1] for b in batch)
     n_mels = batch[0]["mel"].shape[0]
     ctx_audio = torch.zeros(len(batch), n_mels, max_T)
-    ctx_mask  = torch.ones(len(batch), max_T, dtype=torch.bool)
     for i, b in enumerate(batch):
         t = b["mel"].shape[1]
         ctx_audio[i, :, :t] = b["mel"]
-        ctx_mask[i, :t]     = False
     tgt_text = pad_sequence(
         [b["tgt_ids"] for b in batch], batch_first=True, padding_value=PAD
     )
-    # AudioStem has stride-2 conv: output length = ceil(T/2). Downsample mask to match.
-    ctx_mask_ds = ctx_mask[:, ::2]
+    stem_T = _mel_width_to_stem_steps(max_T)
+    ctx_mask_ds = torch.ones(len(batch), stem_T, dtype=torch.bool)
+    for i, b in enumerate(batch):
+        t = b["mel"].shape[1]
+        ctx_mask_ds[i, : _mel_width_to_stem_steps(t)] = False
     return {
         "ctx_audio":    ctx_audio,
         "ctx_text":     None,
@@ -488,13 +525,14 @@ def _collate_text_audio(batch):
     max_T     = max(b["mel"].shape[1] for b in batch)
     n_mels    = batch[0]["mel"].shape[0]
     tgt_audio = torch.zeros(len(batch), n_mels, max_T)
-    tgt_mask  = torch.ones(len(batch), max_T, dtype=torch.bool)
     for i, b in enumerate(batch):
         t = b["mel"].shape[1]
         tgt_audio[i, :, :t] = b["mel"]
-        tgt_mask[i, :t]     = False
-    # AudioStem has stride-2 conv: output length = ceil(T/2). Downsample mask to match.
-    tgt_mask_ds = tgt_mask[:, ::2]
+    stem_T = _mel_width_to_stem_steps(max_T)
+    tgt_mask_ds = torch.ones(len(batch), stem_T, dtype=torch.bool)
+    for i, b in enumerate(batch):
+        t = b["mel"].shape[1]
+        tgt_mask_ds[i, : _mel_width_to_stem_steps(t)] = False
     return {
         "ctx_audio":    None,
         "ctx_text":     ctx_text,
