@@ -21,7 +21,7 @@ GRAD_CLIP   = 1.0
 FREEZE_JEPA = True
 JEPA_CKPT   = "checkpoints/epoch010.pt"
 OUT_DIR     = "checkpoints"
-MAX_SAMPLES = 4000
+MAX_SAMPLES = None
 
 # Toggle objectives — any non-empty subset of {"A", "B", "C"}
 #   "A" : audio  -> text   (transcription)

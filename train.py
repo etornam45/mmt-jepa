@@ -15,7 +15,7 @@ LR         = 3e-4
 BATCH_SIZE = 32
 LOG_EVERY  = 50
 GRAD_CLIP  = 1.0
-MAX_SAMPLES = 4000
+MAX_SAMPLES = None
 
 if __name__ == "__main__":
     device = torch.device(
