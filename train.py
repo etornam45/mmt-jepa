@@ -104,7 +104,7 @@ if __name__ == "__main__":
                     cos = F.cosine_similarity(z_hat, z_tgt, dim=-1).mean().item()
                 flag = " COLLAPSE" if std < 0.01 or cos > 0.99 else ""
                 print(
-                    f"\nstep {step:05d} {'ABC'[loader_idx]}  loss {loss.item():.4f}  "
+                    f"\nstep {step:05d} {'BC'[loader_idx]}  loss {loss.item():.4f}  "
                     f"pred {pred_loss.item():.4f}  sigreg {sigreg_loss.item():.4f}  "
                     f"std {std:.3f}  cos {cos:.3f}  lr {sched.get_last_lr()[0]:.2e}{flag}"
                 )
