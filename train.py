@@ -24,8 +24,8 @@ if __name__ == "__main__":
         else "cpu"
     )
     print("Device:", device)
-    run_log = TrainingLogger.create(name="jepa")
-    print(f"Metrics dir: {run_log.run_path}")
+    # run_log = TrainingLogger.create(name="jepa")
+    # print(f"Metrics dir: {run_log.run_path}")
 
     import sentencepiece as spm
     sp = spm.SentencePieceProcessor()
@@ -108,23 +108,23 @@ if __name__ == "__main__":
                     f"pred {pred_loss.item():.4f}  sigreg {sigreg_loss.item():.4f}  "
                     f"std {std:.3f}  cos {cos:.3f}  lr {sched.get_last_lr()[0]:.2e}{flag}"
                 )
-                run_log.log_step(
-                    {
-                        "step": step,
-                        "epoch": epoch + 1,
-                        "branch": "ABC"[loader_idx],
-                        "loss": loss.item(),
-                        "pred_loss": pred_loss.item(),
-                        "sigreg_loss": sigreg_loss.item(),
-                        "std": std,
-                        "cos": cos,
-                        "lr": sched.get_last_lr()[0],
-                    }
-                )
+                # run_log.log_step(
+                #     {
+                #         "step": step,
+                #         "epoch": epoch + 1,
+                #         "branch": "ABC"[loader_idx],
+                #         "loss": loss.item(),
+                #         "pred_loss": pred_loss.item(),
+                #         "sigreg_loss": sigreg_loss.item(),
+                #         "std": std,
+                #         "cos": cos,
+                #         "lr": sched.get_last_lr()[0],
+                #     }
+                # )
 
         avg = running / max(1, steps_per_epoch)
         print(f"epoch {epoch+1}/{EPOCHS}  avg_loss {avg:.4f}  {time.time()-t0:.0f}s")
-        run_log.log_epoch(epoch + 1, avg, time.time() - t0)
+        # run_log.log_epoch(epoch + 1, avg, time.time() - t0)
         torch.save(model.state_dict(), f"checkpoints/epoch{epoch+1:03d}.pt")
 
-    run_log.close()
+    # run_log.close()
