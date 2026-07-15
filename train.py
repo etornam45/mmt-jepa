@@ -33,11 +33,11 @@ if __name__ == "__main__":
 
     cfg = ModelConfig()
 
-    loader_a = ObjA(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
+    # loader_a = ObjA(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
     loader_b = ObjB(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
     loader_c = ObjC(sp, cfg, max_samples=MAX_SAMPLES).loader(batch_size=BATCH_SIZE, num_workers=2)
 
-    loaders         = [loader_a, loader_b, loader_c]
+    loaders         = [loader_b, loader_c]
     steps_per_epoch = sum(len(loader) for loader in loaders)
     total           = steps_per_epoch * EPOCHS
     print(f"Steps/epoch: {steps_per_epoch:,}  total: {total:,}")
